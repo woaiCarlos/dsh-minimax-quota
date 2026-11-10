@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "title": "MiniMax 额度",
+    "description": "在对话输入框下方显示 MiniMax 编程套餐剩余额度（5 小时窗口与周窗口），点击可查看详情。"
+  },
+  "minimaxQuota": {
+    "intervalLabel": "5小时",
+    "weeklyLabel": "周",
+    "remaining": "剩余 {percent}%",
+    "intervalReset": "5 小时窗口将于 {when} 重置",
+    "weeklyReset": "周窗口将于 {when} 重置",
+    "noWeeklyLimit": "当前套餐没有周额度限制。",
+    "unavailable": "无法获取 MiniMax 额度",
+    "missingCredential": "尚未配置 MiniMax 凭据。",
+    "requestFailed": "无法连接 MiniMax：{message}",
+    "loading": "正在读取 MiniMax 额度…",
+    "panelTitle": "MiniMax 额度",
+    "panelSubtitle": "编程套餐剩余额度",
+    "used": "已使用 {percent}%",
+    "panelIntervalTitle": "5 小时窗口",
+    "panelWeeklyTitle": "周窗口",
+    "panelResetIn": "距离重置还有 {duration}",
+    "panelFetchedAt": "更新于 {when}",
+    "panelModel": "模型分组：{name}",
+    "daily": "{days} 天 {hours} 小时",
+    "hours": "{hours} 小时 {minutes} 分钟",
+    "minutes": "{minutes} 分钟",
+    "seconds": "{seconds} 秒"
+  }
+}

@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check index.js
+          node --check client.js
+
+      - name: Validate JSON manifests
+        run: |
+          node -e "
+            for (const f of ['package.json', 'dsh-plugin.json', 'locale/en.json', 'locale/zh.json']) {
+              JSON.parse(require('fs').readFileSync(f, 'utf8'));
+              console.log('ok', f);
+            }
+          "
+
+      - name: Validate the bundle patch
+        run: |
+          node -e "
+            const fs = require('fs');
+            const text = fs.readFileSync('cordis.patch.yml', 'utf8');
+            if (!/^\s*-\s*insert:/m.test(text)) throw new Error('patch has no insert list');
+            if (!/name:\s*'dsh-minimax-quota'/.test(text)) throw new Error('patch does not insert this package');
+            console.log('ok cordis.patch.yml');
+          "
+
+      - name: Guard against committed secrets
+        run: |
+          # No real API key may ever enter the repository.
+          if git grep -nE "sk-[A-Za-z0-9_-]{16,}" -- . ':!README*.md'; then
+            echo "::error::a credential-like value is committed to this repository"
+            exit 1
+          fi
+          echo "ok no credentials found"
+
+      - name: Check the client half registers its package name
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const client = fs.readFileSync('client.js', 'utf8');
+            if (!client.includes(\"id: '\" + pkg.name + \"'\")) {
+              throw new Error('client.js must register the module id equal to the package name (' + pkg.name + ')');
+            }
+            console.log('ok client module id');
+          "

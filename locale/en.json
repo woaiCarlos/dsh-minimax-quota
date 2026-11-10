@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "title": "MiniMax Quota",
+    "description": "Shows the remaining MiniMax coding-plan quota (5-hour window and weekly window) below the chat composer, with the detail on click."
+  },
+  "minimaxQuota": {
+    "intervalLabel": "5h",
+    "weeklyLabel": "Week",
+    "remaining": "{percent}% left",
+    "intervalReset": "5-hour window resets {when}",
+    "weeklyReset": "Weekly window resets {when}",
+    "noWeeklyLimit": "This plan has no weekly limit.",
+    "unavailable": "MiniMax quota unavailable",
+    "missingCredential": "No MiniMax credential is configured.",
+    "requestFailed": "Could not reach MiniMax: {message}",
+    "loading": "Reading MiniMax quota…",
+    "panelTitle": "MiniMax quota",
+    "panelSubtitle": "Coding plan remaining",
+    "used": "{percent}% used",
+    "panelIntervalTitle": "5-hour window",
+    "panelWeeklyTitle": "Weekly window",
+    "panelResetIn": "Resets in {duration}",
+    "panelFetchedAt": "Updated {when}",
+    "panelModel": "Model bucket: {name}",
+    "daily": "{days}d {hours}h",
+    "hours": "{hours}h {minutes}m",
+    "minutes": "{minutes}m",
+    "seconds": "{seconds}s"
+  }
+}
