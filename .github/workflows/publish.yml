@@ -1,0 +1,53 @@
+name: Publish Package
+
+# Publishing uses npm trusted publishing (OIDC): this workflow never holds a
+# long-lived npm token. npm exchanges the runner's OIDC identity for a
+# short-lived, workflow-scoped publish token.
+#
+# Setup on npmjs.com (one time), in the package settings:
+#   Trusted Publisher -> GitHub Actions
+#     Organization or user : woaiCarlos
+#     Repository           : dsh-minimax-quota
+#     Workflow filename    : publish.yml
+#
+# Then publish by tagging:  git tag v1.0.0 && git push origin v1.0.0
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest # trusted publishing requires a GitHub-hosted runner
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # never cache in a release build
+
+      - run: npm ci
+
+      - name: Verify the package before publishing
+        run: |
+          node --check index.js
+          node --check client.js
+          node -e "
+            const pkg = require('./package.json');
+            if (!pkg.dsh?.bundle?.patch) throw new Error('package.json must declare dsh.bundle.patch');
+            const client = require('fs').readFileSync('client.js', 'utf8');
+            if (!client.includes(\"id: '\" + pkg.name + \"'\")) {
+              throw new Error('client.js must register the module id equal to the package name');
+            }
+          "
+
+      - name: Publish
+        run: npm publish --provenance --access public

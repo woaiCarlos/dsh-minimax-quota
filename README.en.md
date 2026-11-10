@@ -51,6 +51,37 @@ A ready-made copy lives in [`catalog/awesome-dsh-plugin.yml`](catalog/awesome-ds
 
 That catalog's CI checks that the repository is **at least one day old**. This repository was created at 2026-11-10 09:04 UTC, so the PR can go in from 2026-11-11 09:04 UTC onward.
 
+## Releasing (publishing to npm)
+
+Releases use npm's official **trusted publishing (OIDC)** flow: the workflow never holds a
+long-lived npm token. npm exchanges the runner's OIDC identity for a short-lived publish
+token bound to that workflow. After the first release, set the package's **Publishing access**
+to *Require two-factor authentication and disallow tokens* and the token path is gone for good.
+
+One-time setup (the package settings page on npmjs.com):
+
+| Field | Value |
+| --- | --- |
+| Select your publisher | GitHub Actions |
+| Organization or user | `woaiCarlos` |
+| Repository | `dsh-minimax-quota` |
+| Workflow filename | `publish.yml` |
+
+Every later release is just a tag:
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+`.github/workflows/publish.yml` runs the checks and then `npm publish --provenance`.
+
+The very first publish (the package does not exist on npm yet, so a trusted publisher cannot
+be configured) uses a one-time code from your authenticator:
+
+```bash
+npm publish --otp=<6-digit code from your authenticator app>
+```
+
 ## Does my API key leak?
 
 **No.** Specifically:

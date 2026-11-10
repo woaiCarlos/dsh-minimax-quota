@@ -21,16 +21,17 @@
     "./icon": "./icon.svg"
   },
   "files": [
-    "index.js",
+    "LICENSE",
+    "README.en.md",
+    "README.md",
     "client.js",
     "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg",
-    "dsh-plugin.json",
     "docs",
-    "README.md",
-    "README.en.md",
-    "LICENSE"
+    "dsh-plugin.json",
+    "icon.svg",
+    "index.js",
+    "locale/*.json",
+    "package-lock.json"
   ],
   "repository": {
     "type": "git",
@@ -54,5 +55,12 @@
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
+  },
+  "scripts": {
+    "test": "node --check index.js && node --check client.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

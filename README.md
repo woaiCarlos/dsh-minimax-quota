@@ -58,6 +58,36 @@ icon: https://raw.githubusercontent.com/woaiCarlos/dsh-minimax-quota/main/assets
 另外，本地市场索引的生成脚本 `plugin-market/generate-index.mjs` 支持 Git 源的条目
 （输入 `git-plugins.json`），用 DSH 自带的索引校验器校验后才写出 `index.json`。
 
+## 发版（发布到 npm）
+
+本仓库用 npm 官方的 **Trusted Publishing（OIDC）**发版：CI 里不保存任何长期 npm token，
+npm 用工作流的 OIDC 身份换一张短时、绑定该工作流的发布票。首次发布之后，
+在包设置里把 **Publishing access** 改成 *Require two-factor authentication and disallow tokens*，
+token 路线就彻底不用了。
+
+一次性配置（npmjs.com 的包设置页）：
+
+| 字段 | 值 |
+| --- | --- |
+| Select your publisher | GitHub Actions |
+| Organization or user | `woaiCarlos` |
+| Repository | `dsh-minimax-quota` |
+| Workflow filename | `publish.yml` |
+
+之后每次发版只要打 tag：
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+`.github/workflows/publish.yml` 会自动跑校验并 `npm publish --provenance`。
+
+首次发布（包还不存在于 npm，Trusted Publisher 还没法配）用一次性验证码：
+
+```bash
+npm publish --otp=<验证器 App 的 6 位码>
+```
+
 ## 你的 API Key 会不会泄露
 
 **不会。** 具体说：
