@@ -50,4 +50,7 @@ jobs:
           "
 
       - name: Publish
-        run: npm publish --provenance --access public
+        # No --provenance flag: with trusted publishing npm generates the
+        # provenance attestation automatically for a public package from a
+        # public repository.
+        run: npm publish
