@@ -32,6 +32,8 @@ dsh plugin --profile <你的 profile> add file:./dsh-minimax-quota
 
 插件已经收录在本地插件市场的「发现」标签页里（索引条目带 commit 锁定的 GitHub 源，点一下就能装）。
 
+![插件市场条目](docs/market-entry.png)
+
 如果你想让它出现在**社区插件市场**（awesome-dsh-plugin 目录，第三方市场按这个目录做发现），需要给
 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 提一个 PR，
 只加一个文件即可：

@@ -32,6 +32,8 @@ The plugin then appears under **Plugins → Installed** as “MiniMax Quota”. 
 
 The plugin is already listed in the local plugin market's **Discover** tab (its index entry pins a GitHub source to an exact commit, so one click installs it).
 
+![Plugin market entry](docs/market-entry.png)
+
 To appear in the **community market** (the awesome-dsh-plugin catalog the third-party market discovers from), open a PR against
 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) that adds a single file:
 
