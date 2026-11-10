@@ -28,6 +28,34 @@ dsh plugin --profile <你的 profile> add file:./dsh-minimax-quota
 
 > 如果你的 Profile 里还没有 MiniMax 路由，先在 **设置 → 模型** 里加一个 MiniMax 供应商并填入 API Key，插件才有额度可读。
 
+## 出现在插件市场里
+
+插件已经收录在本地插件市场的「发现」标签页里（索引条目带 commit 锁定的 GitHub 源，点一下就能装）。
+
+如果你想让它出现在**社区插件市场**（awesome-dsh-plugin 目录，第三方市场按这个目录做发现），需要给
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 提一个 PR，
+只加一个文件即可：
+
+```yaml
+# data/plugins/woaiCarlos__dsh-minimax-quota.yml
+url: https://github.com/woaiCarlos/dsh-minimax-quota
+name: woaiCarlos/dsh-minimax-quota
+category: usage
+description:
+  en: 'Shows the remaining MiniMax coding-plan quota (5-hour window and weekly window) below the chat composer, with the detail on click.'
+  zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度（5 小时窗口与周窗口），点击可查看详情。'
+icon: https://raw.githubusercontent.com/woaiCarlos/dsh-minimax-quota/main/assets/icon-180.png
+```
+
+现成的文件在 [`catalog/awesome-dsh-plugin.yml`](catalog/awesome-dsh-plugin.yml)，直接复制改名即可。
+仓库已经打了 `dsh-plugin` topic。
+
+该目录的 CI 会检查**仓库至少存在满 1 天**，本仓库创建于 2026-11-10 09:04 UTC，
+所以 PR 需要在 2026-11-11 09:04 UTC 之后提交。
+
+另外，本地市场索引的生成脚本 `plugin-market/generate-index.mjs` 支持 Git 源的条目
+（输入 `git-plugins.json`），用 DSH 自带的索引校验器校验后才写出 `index.json`。
+
 ## 你的 API Key 会不会泄露
 
 **不会。** 具体说：

@@ -1,0 +1,21 @@
+# Entry for the awesome-dsh-plugin community catalog.
+#
+# To submit: open a PR against
+#   https://github.com/awesome-dsh-plugin/awesome-dsh-plugin
+# adding this file as
+#   data/plugins/woaiCarlos__dsh-minimax-quota.yml
+#
+# The catalog requires the repository to be at least one day old (checked by
+# its CI). This repository was created 2026-11-10T09:04Z, so the PR can go in
+# from 2026-11-11T09:04Z onward.
+#
+# Only `description.en` is required; `zh` is optional and a maintainer will add
+# it if left out. A description containing ": " must be quoted.
+
+url: https://github.com/woaiCarlos/dsh-minimax-quota
+name: woaiCarlos/dsh-minimax-quota
+category: usage
+description:
+  en: 'Shows the remaining MiniMax coding-plan quota (5-hour window and weekly window) below the chat composer, with the detail on click.'
+  zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度（5 小时窗口与周窗口），点击可查看详情。'
+icon: https://raw.githubusercontent.com/woaiCarlos/dsh-minimax-quota/main/assets/icon-180.png

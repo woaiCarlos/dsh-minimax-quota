@@ -28,6 +28,27 @@ The plugin then appears under **Plugins → Installed** as “MiniMax Quota”. 
 
 > You still need a MiniMax route in your profile. Add a MiniMax provider with your API key under **Settings → Models** first — the plugin reads the quota of that route.
 
+## Showing up in a plugin market
+
+The plugin is already listed in the local plugin market's **Discover** tab (its index entry pins a GitHub source to an exact commit, so one click installs it).
+
+To appear in the **community market** (the awesome-dsh-plugin catalog the third-party market discovers from), open a PR against
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) that adds a single file:
+
+```yaml
+# data/plugins/woaiCarlos__dsh-minimax-quota.yml
+url: https://github.com/woaiCarlos/dsh-minimax-quota
+name: woaiCarlos/dsh-minimax-quota
+category: usage
+description:
+  en: 'Shows the remaining MiniMax coding-plan quota (5-hour window and weekly window) below the chat composer, with the detail on click.'
+icon: https://raw.githubusercontent.com/woaiCarlos/dsh-minimax-quota/main/assets/icon-180.png
+```
+
+A ready-made copy lives in [`catalog/awesome-dsh-plugin.yml`](catalog/awesome-dsh-plugin.yml). The repository already carries the `dsh-plugin` topic.
+
+That catalog's CI checks that the repository is **at least one day old**. This repository was created at 2026-11-10 09:04 UTC, so the PR can go in from 2026-11-11 09:04 UTC onward.
+
 ## Does my API key leak?
 
 **No.** Specifically:
