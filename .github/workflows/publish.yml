@@ -13,9 +13,10 @@ name: Publish Package
 # Then publish by tagging:  git tag v1.0.0 && git push origin v1.0.0
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Manual only. The plugin is distributed from this Git repository, not from
+  # npm; this workflow exists for the day you decide to publish a package
+  # too. It is deliberately not tag-triggered: an automatic trigger would
+  # fail on every release tag while the package is absent from the registry.
   workflow_dispatch:
 
 permissions:

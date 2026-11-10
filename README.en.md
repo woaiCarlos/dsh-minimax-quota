@@ -11,7 +11,7 @@ Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness cha
 
 ## Install
 
-Straight from GitHub — no npm publish required:
+The plugin is distributed from **this Git repository**, not from npm:
 
 ```bash
 dsh plugin --profile <your profile> add github:woaiCarlos/dsh-minimax-quota
@@ -51,12 +51,26 @@ A ready-made copy lives in [`catalog/awesome-dsh-plugin.yml`](catalog/awesome-ds
 
 That catalog's CI checks that the repository is **at least one day old**. This repository was created at 2026-11-10 09:04 UTC, so the PR can go in from 2026-11-11 09:04 UTC onward.
 
-## Releasing (publishing to npm)
+## Releasing
 
-Releases use npm's official **trusted publishing (OIDC)** flow: the workflow never holds a
-long-lived npm token. npm exchanges the runner's OIDC identity for a short-lived publish
-token bound to that workflow. After the first release, set the package's **Publishing access**
-to *Require two-factor authentication and disallow tokens* and the token path is gone for good.
+The plugin's **distribution channel is this Git repository**, not npm. Commit and push:
+
+```bash
+git commit -am "..." && git push
+```
+
+The market index entry pins a version to a commit SHA, so after each release update the
+`commit` field in `plugin-market/git-plugins.json` and regenerate the index:
+
+```sh
+cd plugin-market
+DSH_MARKET_ON_DEMAND="$PWD/on-demand.json" node generate-index.mjs
+```
+
+### If you ever also want to publish to npm
+
+The repository already carries npm's official **trusted publishing (OIDC)** workflow
+(`.github/workflows/publish.yml`), which keeps no long-lived npm token in CI.
 
 One-time setup (the package settings page on npmjs.com):
 
@@ -67,13 +81,17 @@ One-time setup (the package settings page on npmjs.com):
 | Repository | `dsh-minimax-quota` |
 | Workflow filename | `publish.yml` |
 
-Every later release is just a tag:
+The workflow is **manual only** (`workflow_dispatch`) for now, because the package does not
+exist on npm yet and an automatic trigger would fail on every release tag. After the first
+successful publish you can switch it to a tag trigger:
 
-```bash
-git tag v1.0.1 && git push origin v1.0.1
+```yaml
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
 ```
-
-`.github/workflows/publish.yml` runs the checks and then `npm publish --provenance`.
 
 The very first publish (the package does not exist on npm yet, so a trusted publisher cannot
 be configured) uses a one-time code from your authenticator:
