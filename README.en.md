@@ -8,7 +8,7 @@ Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness cha
 - The pill reads `5h 95% · Week 37%`, each number with a status dot: green (>40%), amber (≤40%), red (≤15%).
 - Clicking opens a panel: remaining percentage per window, a progress bar, time until each window resets, and when the reading was fetched.
 - Follows the host light/dark theme; all visible text goes through the Harness locale service (Chinese and English included).
-- It also appends newly released MiniMax models to your configured model list — append only, your existing entries are untouched.
+- It also appends newly released MiniMax models to your configured model list — append only, the entries you already have keep their wording.
 
 ## Install
 
@@ -168,7 +168,7 @@ If your key lives under another environment variable name, change the plugin con
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `credentialRef` | `MINIMAX_CN_API_KEY` | The credential reference to read. An environment variable name or a reference in the credential store. |
+| `credentialRef` | `MINIMAX_CN_API_KEY` | The credential reference to read. A reference name in the credential store: letters, digits and underscores, not starting with a digit. |
 
 ## How it works
 
@@ -182,7 +182,30 @@ locale/     Chinese and English strings
 
 The plugin probes the models MiniMax has just released and appends them to the `providers.minimax-cn.models` list in the pi-ai configuration.
 Every new model is measured: whether it still answers, what its maximum output per call is, and whether it supports thinking.
-**The entries you already have are never modified or removed** — the plugin only appends. A model you deleted by hand is not added back either.
+**The entries you already have are never removed, never reordered and never changed in value** — the plugin only appends. A model you deleted by hand is not added back either.
+
+One thing to know about the write: the **route-level defaults the pi-ai schema resolves** (`defaultContextWindow`, `defaultMaxTokens` and the like) land in that route in the profile patch along with the new list. **The model entries you wrote are written back exactly as they are.**
+
+### When the sync runs
+
+| When | What happens |
+| --- | --- |
+| After the plugin starts | One sync once the profile has loaded (up to five attempts) |
+| Every 24 hours | One sweep of MiniMax's model list; a newly released model is appended |
+| The "Sync now" button in the panel | One sync right away; the panel says whether it worked |
+
+A quiet day costs **one model-list request**: the models the plugin added before, and the models MiniMax has retired, are remembered in the plugin's own state file and are never probed again. A retired model is probed once, and that decision is remembered, so it does not cost two requests every day.
+
+### The state file
+
+The plugin's bookkeeping lives in one file inside the profile directory, not in your profile patch:
+
+```
+<profileDir>/dsh-minimax-state.json
+{ "addedModels": ["MiniMax-M3.1-Flash"], "retiredModels": ["MiniMax-M2"], "lastSyncAt": 1760000000000 }
+```
+
+`addedModels` holds the models the plugin appended — which is why **a model you deleted by hand does not come back**; `retiredModels` holds the models MiniMax has retired. **Deleting this file throws those records away**: a model you removed by hand will reappear on the next sync, and a retired model will be probed once more.
 
 ### Where the data comes from
 
@@ -207,10 +230,11 @@ The code tries three equivalent paths in turn (`coding_plan/remains`, `api/openp
 
 ### Implementation notes
 
-- **The Host half declares `inject: ['webServer']`.** This is required: the `webServer` service comes from the web app bundle and may load *after* this plugin. Without the declaration the plugin runs too early, silently skips registering the route, and the UI shows “cannot connect”.
+- **The Host half declares `inject: ['webServer', 'credentials', 'settings', 'profileContext']`.** This is required: the `webServer` service comes from the web app bundle and may load *after* this plugin. Without the declaration the plugin runs too early, silently skips registering the route, and the UI shows “cannot connect”. `profileContext` is declared for the same reason: the plugin's bookkeeping lives in the profile directory, and without that service the plugin forgets which models it added — so a model you deleted by hand would quietly come back.
 - **The reading refreshes every 60 seconds**, and again when you hover or click the pill.
 - **The pill only appears for MiniMax models.** An account with no plan quota (pay-as-you-go) hides the entry entirely rather than showing an empty reading.
 - The quota half is display-only: it writes no session events, never changes the selected model, and takes no part in the prompt. The model sync only appends entries to the end of the profile's MiniMax model list.
+- **Every sync leaves one line on the Host log**, saying how many models it added; a failed sync is logged too (the reason goes to the Host log, the browser only gets a fixed notice).
 
 ## Known limitations
 
