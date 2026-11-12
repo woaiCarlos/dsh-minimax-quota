@@ -46,6 +46,25 @@ jobs:
             console.log('ok cordis.patch.yml');
           "
 
+      - name: Check the declared versions agree
+        run: |
+          # The plugin manager decides whether a Git-installed copy is
+          # outdated by comparing the version this package declares, so
+          # package.json and dsh-plugin.json must agree, and a release
+          # must not carry a version older than the one it ships.
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            const plugin = JSON.parse(fs.readFileSync('dsh-plugin.json', 'utf8'));
+            if (pkg.version !== plugin.version) {
+              throw new Error('package.json says ' + pkg.version + ' but dsh-plugin.json says ' + plugin.version);
+            }
+            if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(pkg.version)) {
+              throw new Error('the version must be exact semver, got ' + pkg.version);
+            }
+            console.log('ok version ' + pkg.version);
+          "
+
       - name: Guard against committed secrets
         run: |
           # No real MiniMax key may ever enter the repository, and the
