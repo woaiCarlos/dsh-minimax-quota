@@ -640,29 +640,10 @@ export function lookupSpec(modelId) {
 }
 ```
 
-- [ ] **Step 4: Freeze the modality list this task now depends on**
-
-This task is the first production consumer of `lib/specs.js`, and it filters an entry's
-modalities through `SUPPORTED_MODALITIES` — the exported list that decides what an entry
-may carry. A mutable export gating a production filter is the same hazard the Task 2
-review found in the snapshot itself, so freeze it:
-
-```js
-export const SUPPORTED_MODALITIES = Object.freeze(['text', 'image'])
-```
-
-Add a case to `test/specs.test.js`:
-
-```js
-test('the modality list cannot be mutated', () => {
-  assert.throws(() => SUPPORTED_MODALITIES.push('video'), TypeError)
-})
-```
-
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/specs.test.js`
-Expected: PASS — 13 tests.
+Expected: PASS — 12 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1619,29 +1600,10 @@ export function planAppend({ currentModels = [], addedModels = [], candidateIds 
 }
 ```
 
-- [ ] **Step 4: Freeze the modality list this task now depends on**
-
-This task is the first production consumer of `lib/specs.js`, and it filters an entry's
-modalities through `SUPPORTED_MODALITIES` — the exported list that decides what an entry
-may carry. A mutable export gating a production filter is the same hazard the Task 2
-review found in the snapshot itself, so freeze it:
-
-```js
-export const SUPPORTED_MODALITIES = Object.freeze(['text', 'image'])
-```
-
-Add a case to `test/specs.test.js`:
-
-```js
-test('the modality list cannot be mutated', () => {
-  assert.throws(() => SUPPORTED_MODALITIES.push('video'), TypeError)
-})
-```
-
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/merge.test.js`
-Expected: PASS — 7 tests.
+Expected: PASS — 6 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1793,29 +1755,10 @@ export async function writeState(dir, state) {
 }
 ```
 
-- [ ] **Step 4: Freeze the modality list this task now depends on**
-
-This task is the first production consumer of `lib/specs.js`, and it filters an entry's
-modalities through `SUPPORTED_MODALITIES` — the exported list that decides what an entry
-may carry. A mutable export gating a production filter is the same hazard the Task 2
-review found in the snapshot itself, so freeze it:
-
-```js
-export const SUPPORTED_MODALITIES = Object.freeze(['text', 'image'])
-```
-
-Add a case to `test/specs.test.js`:
-
-```js
-test('the modality list cannot be mutated', () => {
-  assert.throws(() => SUPPORTED_MODALITIES.push('video'), TypeError)
-})
-```
-
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/state.test.js`
-Expected: PASS — 6 tests.
+Expected: PASS — 5 tests.
 
 - [ ] **Step 5: Commit**
 
