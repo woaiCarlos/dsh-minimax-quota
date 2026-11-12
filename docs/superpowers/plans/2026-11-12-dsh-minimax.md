@@ -4731,14 +4731,17 @@ const CLIENT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'client.
  *
  * The browser half hands a component to the slot it registers, so a test
  * needs a renderer to see what the component renders. This one implements
- * the four hooks the module uses, runs the effects after a render, and
+ * the hooks the module uses, runs the effects after a render, and
  * re-renders when the test asks for it.
  *
- * @returns `{ React, render, unmount }`.
+ * @returns `{ React, render, unmount, effects }`.
  */
 function createReact() {
   const hooks = []
   let cursor = 0
+  // Every effect the component declared, in hook order, with the dependency
+  // array it was given and how often it ran.
+  const effects = []
 
   const React = {
     createElement(type, props, ...children) {
@@ -4765,6 +4768,20 @@ function createReact() {
       if (hooks.length <= index) hooks[index] = { current: initial }
       return hooks[index]
     },
+    useMemo(fn, deps) {
+      const index = cursor++
+      if (hooks.length <= index) hooks[index] = { deps: undefined, value: undefined }
+      const hook = hooks[index]
+      const changed = hook.deps === undefined
+        || deps === undefined
+        || deps.length !== hook.deps.length
+        || deps.some((dep, i) => !Object.is(dep, hook.deps[i]))
+      if (changed) {
+        hook.value = fn()
+        hook.deps = deps
+      }
+      return hook.value
+    },
     useCallback(fn, deps) {
       const index = cursor++
       if (hooks.length <= index) hooks[index] = { deps: undefined, fn }
@@ -4781,7 +4798,7 @@ function createReact() {
     },
     useEffect(fn, deps) {
       const index = cursor++
-      if (hooks.length <= index) hooks[index] = { deps: undefined, cleanup: undefined }
+      if (hooks.length <= index) hooks[index] = { deps: undefined, cleanup: undefined, index }
       const hook = hooks[index]
       const changed = hook.deps === undefined
         || deps === undefined
@@ -4791,6 +4808,9 @@ function createReact() {
       hook.fn = fn
       hook.pending = changed
       if (changed) pending.push(hook)
+      const record = effects[index] ?? (effects[index] = { deps: undefined, fn: undefined, runs: 0 })
+      record.deps = deps
+      record.fn = fn
     },
   }
 
@@ -4831,6 +4851,7 @@ function createReact() {
       if (typeof hook.cleanup === 'function') hook.cleanup()
       const cleanup = hook.fn()
       hook.cleanup = typeof cleanup === 'function' ? cleanup : undefined
+      effects[hook.index].runs += 1
     }
     return tree
   }
@@ -4844,7 +4865,7 @@ function createReact() {
     }
   }
 
-  return { React, render, unmount }
+  return { React, render, unmount, effects }
 }
 
 /**
@@ -4912,8 +4933,9 @@ async function flush(rounds = 20) {
  * misbehaves, because a real browser's storage can be missing or can throw.
  *
  * @param options - `{ mode }`: `ok` stores the values, `missing` has no
- *   storage at all, `throw` throws when the storage is touched, and
- *   `failing` has a storage whose every method throws.
+ *   storage at all, `throw` throws when the storage is touched, `failing`
+ *   has a storage whose every method throws, and `corrupt` holds a value
+ *   that is not JSON.
  * @returns the storage double.
  */
 function createStorage({ mode = 'ok' } = {}) {
@@ -4954,6 +4976,11 @@ function createStorage({ mode = 'ok' } = {}) {
     return storage
   }
   const values = new Map()
+  if (mode === 'corrupt') {
+    // The value another program — or an older version of this one — left
+    // behind is not JSON at all.
+    values.set('dsh-minimax.seen-models', '{not json')
+  }
   const storage = {
     mode,
     values,
@@ -5048,7 +5075,7 @@ function statusPayload({
  */
 async function mountPill({ fetchImpl, storage }) {
   const { module } = await loadClient({ storage })
-  const { React, render, unmount } = createReact()
+  const { React, render, unmount, effects } = createReact()
   const ReactDOM = {
     createPortal: (node, container) => ({ node, container }),
   }
@@ -5092,6 +5119,7 @@ async function mountPill({ fetchImpl, storage }) {
   globalThis.fetch = fetchImpl
   return {
     dictionaries,
+    effects,
     props,
     render: () => render(component, props),
     unmount,
@@ -5271,6 +5299,9 @@ test('the locale dictionaries and the locale files carry the same keys', async (
     // name itself in the page, so the two have to agree.
     assert.deepEqual(Object.keys(dictionaries.zh).sort(), Object.keys(zhFile).sort())
     assert.deepEqual(Object.keys(dictionaries.en).sort(), Object.keys(enFile).sort())
+    // And they have to agree on the wording too, not only on the keys.
+    assert.deepEqual(dictionaries.zh, zhFile)
+    assert.deepEqual(dictionaries.en, enFile)
   } finally {
     pill.dispose()
   }
@@ -5313,6 +5344,60 @@ test('the badge shows how many models the user has not been told about', async (
   }
 })
 
+test('the badge is an image with a name, not a nameless span', async () => {
+  const storage = createStorage()
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5'])), { status: 200 }),
+  })
+  try {
+    const tree = await settle(pill)
+    const badge = byClass(tree, '__mmq_badge')
+    assert.ok(badge !== undefined, 'the badge did not render')
+    // A span with no role is a generic element, whose name is prohibited,
+    // so the label would never be exposed and the screen reader would hear
+    // a bare digit. The badge is an image with a name instead.
+    assert.equal(badge.props.role, 'img')
+    assert.ok(String(badge.props['aria-label']).includes('modelsAdded'))
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('the badge and the panel line never say the same thing', async () => {
+  const storage = createStorage()
+  // One of the two models has already been acknowledged.
+  storage.values.set('dsh-minimax.seen-models', JSON.stringify(['MiniMax-M2.5']))
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5', 'MiniMax-M3.1'])), { status: 200 }),
+  })
+  try {
+    let tree = await settle(pill)
+    // The badge counts the models that are new to the user…
+    const badge = byClass(tree, '__mmq_badge')
+    assert.ok(badge !== undefined, 'the badge did not render')
+    assert.equal(textOf(badge), '1')
+    const badgeName = String(badge.props['aria-label'])
+    assert.ok(badgeName.includes('modelsAdded'))
+    assert.ok(!badgeName.includes('modelsTotalAdded'))
+    // …and the panel counts the models the plugin added in all.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    const notice = byClass(tree, '__mmq_modelNotice')
+    assert.ok(notice !== undefined, 'the panel has no models line')
+    const line = textOf(notice)
+    assert.ok(line.includes('modelsTotalAdded'), 'the panel reuses the badge wording')
+    assert.ok(!line.includes('modelsAdded'), 'the panel reuses the badge wording')
+    assert.ok(line.includes('2'))
+  } finally {
+    pill.dispose()
+  }
+})
+
 test('opening the panel clears the badge and remembers it', async () => {
   const storage = createStorage()
   const pill = await mountPill({
@@ -5331,6 +5416,13 @@ test('opening the panel clears the badge and remembers it', async () => {
     // The models are remembered, so the next mount does not show them again.
     const stored = JSON.parse(storage.values.get('dsh-minimax.seen-models'))
     assert.deepEqual(stored, ['MiniMax-M2.5'])
+    // Closing the panel does not bring the badge back: the user has been told.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge came back after the panel closed')
   } finally {
     pill.dispose()
   }
@@ -5392,10 +5484,118 @@ test('a model added after the panel was opened brings the badge back', async () 
     tree = pill.render()
     await flush()
     tree = pill.render()
+    // The badge is not rendered while the panel is open: the panel is where
+    // the news is delivered.
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge was rendered while the panel was open')
+    // Closing the panel shows it again: the new model is still news.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
     const badge = byClass(tree, '__mmq_badge')
     assert.ok(badge !== undefined, 'the badge did not come back for the new model')
     // Only the model the user has not been told about counts.
     assert.equal(textOf(badge), '1')
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('the read that opens the panel marks the models it brings', async () => {
+  const storage = createStorage()
+  let added = ['MiniMax-M2.5']
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(added)), { status: 200 }),
+  })
+  try {
+    let tree = await settle(pill)
+    assert.equal(textOf(byClass(tree, '__mmq_badge')), '1')
+    // The Host adds a model between the poll and the click.
+    added = ['MiniMax-M2.5', 'MiniMax-M3.1']
+    byClass(tree, '__mmq_pill').props.onClick()
+    // The panel opens with the reading the poll brought.
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    // The badge is where the user sees it, so the panel is closed first.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge came back for a model the panel showed')
+    // And the models the read brought are remembered.
+    const stored = JSON.parse(storage.values.get('dsh-minimax.seen-models'))
+    assert.deepEqual(stored, ['MiniMax-M2.5', 'MiniMax-M3.1'])
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('the marking effect lists everything it uses', async () => {
+  const storage = createStorage()
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5'])), { status: 200 }),
+  })
+  try {
+    let tree = await settle(pill)
+    // The effect that marks the models is the one that calls the callback.
+    const marking = pill.effects.find((effect) => effect?.fn?.toString().includes('markSeen'))
+    assert.ok(marking !== undefined, 'the marking effect was not found')
+    // It lists the callback it calls…
+    const callback = marking.deps.find((dep) => typeof dep === 'function')
+    assert.ok(callback !== undefined, 'the effect does not list the marking callback')
+    // …and the models it marks.
+    assert.ok(
+      marking.deps.some((dep) => Array.isArray(dep) && dep.includes('MiniMax-M2.5')),
+      'the effect does not list the models it marks',
+    )
+    // Opening the panel marks the models, so the seen set changes.
+    byClass(tree, '__mmq_pill').props.onClick()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    // The callback did not change, so the effect does not run again for the
+    // seen set: the dependency array is honest.
+    assert.equal(
+      marking.deps.find((dep) => typeof dep === 'function'),
+      callback,
+      'the marking callback changed when the seen set changed',
+    )
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('a storage that holds a corrupt value does not break the plugin', async () => {
+  const storage = createStorage({ mode: 'corrupt' })
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5', 'MiniMax-M3.1'])), { status: 200 }),
+  })
+  try {
+    let tree = await settle(pill)
+    // The corrupt value holds nothing, so every added model is news.
+    const badge = byClass(tree, '__mmq_badge')
+    assert.ok(badge !== undefined, 'the badge did not render with the corrupt storage')
+    assert.equal(textOf(badge), '2')
+    // Opening the panel repairs the value: the next write leaves a JSON
+    // array behind.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    const stored = JSON.parse(storage.values.get('dsh-minimax.seen-models'))
+    assert.ok(Array.isArray(stored), 'the corrupt value was not rewritten as a JSON array')
+    assert.deepEqual(stored, ['MiniMax-M2.5', 'MiniMax-M3.1'])
   } finally {
     pill.dispose()
   }
@@ -5456,9 +5656,7 @@ test('opening the panel reads the status once', async () => {
 })
 ```
 
-The four tests cover the four things a user would notice```
-
-The eleven tests cover the things a user would notice: a failed manual sync leaves an error line
+The sixteen tests cover the things a user would notice: a failed manual sync leaves an error line
 in the panel, that line survives a status route that failed as well, the panel opens even when the
 quota could not be read, a successful manual sync refreshes the model list right away instead of
 waiting for the next poll, and the locale files and the inline dictionaries agree. The six the
@@ -5466,11 +5664,15 @@ notice marker needs are the rest: the badge counts the models the user has not b
 opening the panel clears it and remembers the models, a fresh component instance — a new
 conversation — does not bring it back, a model the plugin adds later brings it back with the new
 count, a storage that is missing or that throws leaves the plugin working, and opening the panel
-reads the status once.
+reads the status once. The five the review added are the last: the badge is an image with a name
+instead of a nameless span, the badge and the panel line never say the same thing, the read that
+opens the panel marks the models it brings, the marking effect lists everything it uses, and a
+storage that holds a corrupt value leaves the plugin working and is repaired by the next write.
 
 The storage double is part of the test, because the browser half has to survive a storage that
 does not work: `missing` has no storage at all, `throw` throws when the storage is touched — some
-private browsing modes do — and `failing` has a storage whose every method throws.
+private browsing modes do — `failing` has a storage whose every method throws, and `corrupt` holds
+a value that is not JSON at all.
 
 - [ ] **Step 9: The browser half as committed**
 
@@ -5518,6 +5720,7 @@ window.__ModuleLoader__.load({
       panelModel: '模型分组：{name}',
       modelsTitle: '已同步的模型',
       modelsAdded: '已自动补充 {count} 个新模型',
+      modelsTotalAdded: '插件已自动添加 {count} 个模型',
       modelsSyncedAt: '模型列表更新于 {when}',
       modelsSync: '立即同步',
       modelsSyncing: '同步中…',
@@ -5548,6 +5751,7 @@ window.__ModuleLoader__.load({
       panelModel: 'Model bucket: {name}',
       modelsTitle: 'Synced models',
       modelsAdded: '{count} new model(s) added automatically',
+      modelsTotalAdded: 'The plugin has added {count} model(s) in total',
       modelsSyncedAt: 'Model list updated at {when}',
       modelsSync: 'Sync now',
       modelsSyncing: 'Syncing…',
@@ -5674,6 +5878,20 @@ window.__ModuleLoader__.load({
       if (percent <= 15) return ' __mmq_barFillCritical'
       if (percent <= 40) return ' __mmq_barFillLow'
       return ''
+    }
+
+    /**
+     * The ids of the models the plugin added, in a status payload.
+     *
+     * The plugin's own list of added models is cumulative, so the count —
+     * not the list — is what says whether there is news.
+     *
+     * @param payload - the status payload.
+     * @returns the model ids the plugin added.
+     */
+    function addedModelIds(payload) {
+      const added = payload?.models?.added
+      return Array.isArray(added) ? added : []
     }
 
     // ── the models the user has been told about ───────────────────────────
@@ -6007,7 +6225,7 @@ window.__ModuleLoader__.load({
             )
           : null,
         added.length > 0
-          ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
+          ? h('div', { className: '__mmq_modelNotice' }, t('modelsTotalAdded', { count: added.length }))
           : null,
         models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
         onSync
@@ -6040,6 +6258,9 @@ window.__ModuleLoader__.load({
       const panelRef = React.useRef(null)
       // Whether the models of this panel opening have been told already.
       const toldRef = React.useRef(false)
+      // The same set of seen models, for the marking callback: it reads the
+      // ref, so the callback never depends on the state and stays stable.
+      const seenRef = React.useRef(seen)
 
       // The status route answers both halves: the quota the pill shows and
       // the model summary the panel lists.
@@ -6094,24 +6315,27 @@ window.__ModuleLoader__.load({
         }
       }, [active, current?.provider, current?.model])
 
-      // The badge counts the models the plugin added that the user has not
-      // been told about yet. The plugin's own list of added models is
-      // cumulative, so the count — not the list — is what says whether
-      // there is news.
-      const addedModels = Array.isArray(payload?.models?.added) ? payload.models.added : []
+      // The models the plugin added, and the ones the user has not been
+      // told about yet.
+      const addedModels = React.useMemo(() => addedModelIds(payload), [payload])
       const unseen = addedModels.filter((id) => !seen.has(id))
 
       // Tell the user about the models the plugin added: they are marked as
       // seen and remembered, so the badge stays away — also after the user
       // opens a different conversation.
+      //
+      // The callback reads the current set from the ref, so it never depends
+      // on the state and stays stable across renders.
       const markSeen = React.useCallback((ids) => {
-        const fresh = ids.filter((id) => !seen.has(id))
+        const current = seenRef.current
+        const fresh = ids.filter((id) => !current.has(id))
         if (fresh.length === 0) return
-        const next = new Set(seen)
+        const next = new Set(current)
         for (const id of fresh) next.add(id)
+        seenRef.current = next
         setSeen(next)
         writeSeenModels(fresh)
-      }, [seen])
+      }, [])
 
       // Opening the panel is the moment the user is told which models the
       // plugin added. The panel only shows once the status route answered,
@@ -6126,7 +6350,7 @@ window.__ModuleLoader__.load({
         if (payload === null) return
         toldRef.current = true
         markSeen(addedModels)
-      }, [open, payload])
+      }, [open, payload, markSeen, addedModels])
 
       // Place the panel above the trigger, inside the viewport. The panel is
       // portaled into the document body, so its node attaches after this
@@ -6281,6 +6505,11 @@ window.__ModuleLoader__.load({
                 if (opening) {
                   readStatus().then((result) => {
                     setPayload(result)
+                    // This read is part of the opening, so the models it
+                    // brings are told: the panel is showing them. A model
+                    // that arrives later, while the panel is open, is still
+                    // news and brings the badge back.
+                    markSeen(addedModelIds(result))
                   })
                 }
               },
@@ -6290,12 +6519,18 @@ window.__ModuleLoader__.load({
           ),
           // The badge is the number of models the user has not been told
           // about, and it carries the locale string as its name, so a screen
-          // reader says what the number means.
-          unseen.length > 0
+          // reader says what the number means. It is not rendered while the
+          // panel is open: the panel is where the news is delivered, and a
+          // badge next to it would say it twice.
+          unseen.length > 0 && !open
             ? h(
                 'span',
                 {
                   className: '__mmq_badge',
+                  // A span with no role is a generic element, whose name is
+                  // prohibited, so the label would never be exposed. The
+                  // badge is an image with a name instead.
+                  role: 'img',
                   'aria-label': t('modelsAdded', { count: unseen.length }),
                 },
                 unseen.length,
