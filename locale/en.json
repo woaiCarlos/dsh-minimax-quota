@@ -25,6 +25,8 @@
     "modelsTitle": "Synced models",
     "modelsAdded": "{count} new model(s) added automatically",
     "modelsSyncedAt": "Model list updated at {when}",
+    "modelsSync": "Sync now",
+    "modelsSyncing": "Syncing…",
     "daily": "{days}d {hours}h",
     "hours": "{hours}h {minutes}m",
     "minutes": "{minutes}m",

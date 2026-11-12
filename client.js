@@ -39,6 +39,8 @@ window.__ModuleLoader__.load({
       modelsTitle: '已同步的模型',
       modelsAdded: '已自动补充 {count} 个新模型',
       modelsSyncedAt: '模型列表更新于 {when}',
+      modelsSync: '立即同步',
+      modelsSyncing: '同步中…',
       daily: '{days} 天 {hours} 小时',
       hours: '{hours} 小时 {minutes} 分钟',
       minutes: '{minutes} 分钟',
@@ -66,6 +68,8 @@ window.__ModuleLoader__.load({
       modelsTitle: 'Synced models',
       modelsAdded: '{count} new model(s) added automatically',
       modelsSyncedAt: 'Model list updated at {when}',
+      modelsSync: 'Sync now',
+      modelsSyncing: 'Syncing…',
       daily: '{days}d {hours}h',
       hours: '{hours}h {minutes}m',
       minutes: '{minutes}m',
@@ -107,6 +111,8 @@ window.__ModuleLoader__.load({
       '.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-fill-l2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
       '.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warn-label);font-size:11px}',
       '.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
+      '.__mmq_syncButton{margin-top:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);padding:2px 8px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;cursor:pointer}',
+      '.__mmq_syncButton:disabled{opacity:.6;cursor:default}',
       '.__mmq_badge{position:absolute;top:-2px;right:-2px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}',
       '.__mmq_pillWrap{position:relative;display:inline-flex}',
     ].join('')
@@ -125,6 +131,9 @@ window.__ModuleLoader__.load({
     // ── helpers ───────────────────────────────────────────────────────────
     /** The route that answers the quota view and the model summary. */
     const STATUS_ROUTE = '/plugin/minimax/status'
+
+    /** The route that asks the Host for a model sync. */
+    const SYNC_ROUTE = '/plugin/minimax/sync'
 
     /** Providers whose routes serve the MiniMax model family. */
     function isMiniMaxProvider(provider) {
@@ -268,7 +277,7 @@ window.__ModuleLoader__.load({
      * The anchored panel: one card per quota window, each with a bar and
      * the moment its window resets.
      */
-    function QuotaPanel({ view, models, t, style, panelRef }) {
+    function QuotaPanel({ view, models, t, style, panelRef, onSync, syncing }) {
       const rows = []
       const interval = view.intervalRemainingPercent
       const weekly = view.weeklyRemainingPercent
@@ -363,7 +372,7 @@ window.__ModuleLoader__.load({
         h('div', { className: '__mmq_titleRule', 'aria-hidden': true }),
         h('p', { className: '__mmq_subtitle' }, t('panelSubtitle')),
         h('div', { className: '__mmq_rows' }, rows),
-        h(ModelsPanel, { models, t }),
+        h(ModelsPanel, { models, t, onSync, syncing }),
         h(
           'div',
           { className: '__mmq_hint', style: { marginTop: '10px' } },
@@ -374,12 +383,14 @@ window.__ModuleLoader__.load({
 
     /**
      * The models section: the ids the profile currently holds, how many of
-     * them the plugin added, and the moment the list was last written.
+     * them the plugin added, the moment the list was last written, and the
+     * button that asks the Host for a fresh sync.
      *
-     * The section only reads. The plugin appends and never edits, so the
-     * models it added are the user's to keep or to remove by hand.
+     * The section never edits the list itself: the plugin appends and never
+     * edits, so the models it added are the user's to keep or to remove by
+     * hand. The button only asks; the sync itself runs on the Host.
      */
-    function ModelsPanel({ models, t }) {
+    function ModelsPanel({ models, t, onSync, syncing }) {
       if (models === undefined) return null
       const synced = Array.isArray(models.synced) ? models.synced : []
       const added = Array.isArray(models.added) ? models.added : []
@@ -393,6 +404,14 @@ window.__ModuleLoader__.load({
           ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
           : null,
         models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
+        onSync
+          ? h('button', {
+              className: '__mmq_syncButton',
+              type: 'button',
+              disabled: syncing === true,
+              onClick: onSync,
+            }, syncing === true ? t('modelsSyncing') : t('modelsSync'))
+          : null,
       )
     }
 
@@ -408,6 +427,7 @@ window.__ModuleLoader__.load({
       const [payload, setPayload] = React.useState(null)
       const [open, setOpen] = React.useState(false)
       const [noticeSeen, setNoticeSeen] = React.useState(false)
+      const [syncing, setSyncing] = React.useState(false)
       const [position, setPosition] = React.useState(null)
       const rootRef = React.useRef(null)
       const panelRef = React.useRef(null)
@@ -416,6 +436,20 @@ window.__ModuleLoader__.load({
       // the model summary the panel lists.
       const view = payload?.quota ?? null
       const models = payload?.models
+
+      // The sync probes the candidates MiniMax offers, which can take a while, so
+      // the button asks and lets the status poll report the result.
+      const syncNow = async () => {
+        if (syncing) return
+        setSyncing(true)
+        try {
+          await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+        } catch {
+          // A failed request is reported by the status poll; the button only asks.
+        } finally {
+          setSyncing(false)
+        }
+      }
 
       // Read the quota whenever a MiniMax model is the active selection, and
       // refresh it on a slow cadence so the reading stays current.
@@ -611,6 +645,8 @@ window.__ModuleLoader__.load({
                 t,
                 style: position ?? { position: 'fixed', left: '-9999px', top: '-9999px' },
                 panelRef: panelNodeRef,
+                onSync: syncNow,
+                syncing,
               }),
               document.body,
             )
