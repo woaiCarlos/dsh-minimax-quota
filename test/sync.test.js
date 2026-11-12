@@ -33,6 +33,15 @@ function fakeSettings({ providers = {}, override } = {}) {
       }]
     },
     async write(ns, change, expected, paths) {
+      // The Host service reads every entry of `paths` as a list of field
+      // segments and joins them with a dot, so a write that hands it a flat
+      // list of segments fails there with `path.join is not a function`. The
+      // fake refuses the same shape, so the contract cannot drift unnoticed.
+      for (const path of paths ?? []) {
+        if (!Array.isArray(path)) {
+          throw new TypeError('settings.write expects a list of field paths')
+        }
+      }
       writes.push({ ns, expected, paths, next: change(current) })
     },
   }
@@ -256,10 +265,11 @@ test('runSync appends a newly released model and leaves the rest alone', async (
   assert.equal(settings.writes.length, 1)
   const write = settings.writes[0]
   // The write names the namespace, the revision it read and the one volatile
-  // path it changed, so a write to the wrong place cannot pass unnoticed.
+  // path it changed, so a write to the wrong place cannot pass unnoticed. The
+  // path is a list of field segments, the shape the Host service reads.
   assert.equal(write.ns, 'llm-pi-ai')
   assert.equal(write.expected, 3)
-  assert.deepEqual(write.paths, ['providers', 'minimax-cn', 'models'])
+  assert.deepEqual(write.paths, [['providers', 'minimax-cn', 'models']])
   const written = write.next.providers['minimax-cn'].models
   assert.equal(written.length, 2)
   assert.equal(written[0].id, 'MiniMax-M3')

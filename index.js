@@ -36,6 +36,12 @@ const SETTINGS_NAMESPACE = 'llm-pi-ai'
 /** The provider route inside that namespace. */
 const PROVIDER_ROUTE = 'minimax-cn'
 
+/** The field of the provider map that holds the model list. */
+const PROVIDERS_PATH = 'providers'
+
+/** The field of a provider route that holds the model list. */
+const MODELS_PATH = 'models'
+
 /** How long the first sync waits before it tries again. */
 const FIRST_SYNC_DELAY_MS = 2000
 
@@ -195,7 +201,7 @@ async function runSyncOnce(ctx, options = {}) {
         models: plan.models,
       },
     },
-  }), descriptor.revision, ['providers', PROVIDER_ROUTE, 'models'])
+  }), descriptor.revision, [[PROVIDERS_PATH, PROVIDER_ROUTE, MODELS_PATH]])
 
   const now = options.now ?? Date.now
   try {
