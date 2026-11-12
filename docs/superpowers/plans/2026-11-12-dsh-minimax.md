@@ -2536,6 +2536,9 @@ const STATUS_ROUTE = '/plugin/minimax/status'
 /** Route the Browser half posts to when the user asks for a sync. */
 const SYNC_ROUTE = '/plugin/minimax/sync'
 
+/** How long a day is, in milliseconds. */
+const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000
+
 /** The pi-ai settings namespace that holds the provider list. */
 const SETTINGS_NAMESPACE = 'llm-pi-ai'
 
@@ -2825,6 +2828,11 @@ export async function apply(ctx, config) {
   // writes the profile afterwards.
   const cancelFirstSync = scheduleSync(ctx, credentialRef)
   ctx.effect(() => cancelFirstSync, 'dsh-minimax-quota: first sync')
+
+  // The plugin also probes once a day, so a model MiniMax releases while the
+  // plugin is running still arrives without the user restarting anything.
+  const cancelDailySync = scheduleDailySync(ctx, credentialRef)
+  ctx.effect(() => cancelDailySync, 'dsh-minimax-quota: daily sync')
 }
 
 /**
@@ -2880,6 +2888,64 @@ function scheduleSync(ctx, credentialRef) {
   }
 
   void attempt()
+  return cancel
+}
+
+/**
+ * Probe once a day.
+ *
+ * The plugin probes the models MiniMax offers at startup, and then once a
+ * day, so a model MiniMax releases while the plugin is running still
+ * arrives without the user restarting anything. Only models that are
+ * neither listed by the user nor added by the plugin are probed, so a quiet
+ * day costs one model-list request and nothing else.
+ *
+ * @param ctx - Host context.
+ * @param credentialRef - credential reference to resolve.
+ * @returns a function that cancels the pending sweep.
+ */
+function scheduleDailySync(ctx, credentialRef) {
+  let timer = null
+  let wake = null
+  let cancelled = false
+
+  const wait = (ms) => new Promise((resolve) => {
+    wake = resolve
+    timer = setTimeout(() => {
+      timer = null
+      wake = null
+      resolve()
+    }, ms)
+    timer.unref?.()
+  })
+
+  const cancel = () => {
+    cancelled = true
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+    if (wake !== null) {
+      const resolve = wake
+      wake = null
+      resolve()
+    }
+  }
+
+  const sweep = async () => {
+    while (!cancelled) {
+      await wait(SYNC_INTERVAL_MS)
+      if (cancelled) return
+      try {
+        const result = await runSync(ctx, { credentialRef })
+        ctx.logger?.info?.('%s: %s', 'dsh-minimax-quota: the daily sync found', result.ok ? 'no new model' : result.reason)
+      } catch (error) {
+        reportFailure(ctx, 'the daily sync failed', error)
+      }
+    }
+  }
+
+  void sweep()
   return cancel
 }
 
@@ -3077,17 +3143,92 @@ In `locale/en.json`, add the same keys in English:
 "modelsSyncedAt": "Model list updated at {when}"
 ```
 
-- [ ] **Step 6: Run the checks**
+- [ ] **Step 6: Add the manual sync button**
+
+The design calls for a manual sync in the panel, beside the list of synced models, and the Host
+already answers `POST /plugin/minimax/sync`. The button asks for a sync and does not wait for it
+to finish: the sync probes the candidates MiniMax offers, which can take a while, and the status
+poll refreshes the list when it lands.
+
+Add the route next to the status route in `client.js`:
+
+```js
+const SYNC_ROUTE = '/plugin/minimax/sync'
+```
+
+In the dock component, next to the other state, add the syncing flag and the request:
+
+```js
+const [syncing, setSyncing] = React.useState(false)
+
+// The sync probes the candidates MiniMax offers, which can take a while, so
+// the button asks and lets the status poll report the result.
+const syncNow = async () => {
+  if (syncing) return
+  setSyncing(true)
+  try {
+    await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+  } catch {
+    // A failed request is reported by the status poll; the button only asks.
+  } finally {
+    setSyncing(false)
+  }
+}
+```
+
+Pass them to the panel:
+
+```js
+h(ModelsPanel, { models, t, onSync: syncNow, syncing }),
+```
+
+And let the panel draw the button, under the synced-at line:
+
+```js
+function ModelsPanel({ models, t, onSync, syncing }) {
+```
+
+```js
+        onSync
+          ? h('button', {
+              className: '__mmq_syncButton',
+              type: 'button',
+              disabled: syncing === true,
+              onClick: onSync,
+            }, syncing === true ? t('modelsSyncing') : t('modelsSync'))
+          : null,
+```
+
+Add the two locale strings to the inline `zh` and `en` dictionaries and to both JSON files:
+
+```json
+"modelsSync": "立即同步",
+"modelsSyncing": "同步中…"
+```
+
+```json
+"modelsSync": "Sync now",
+"modelsSyncing": "Syncing…"
+```
+
+And a style for the button, beside the other panel styles:
+
+```css
+'.__mmq_syncButton{margin-top:8px;border:1px solid var(--dsw-alias-stroke-l2);border-radius:var(--dsw-radius-sm);padding:2px 8px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;cursor:pointer}',
+'.__mmq_syncButton:disabled{opacity:.6;cursor:default}',
+```
+
+- [ ] **Step 7: Run the checks**
 
 Run: `npm test`
 Expected: PASS — the suite plus both syntax checks.
 
-- [ ] **Step 7: Verify the locale JSON parses**
+- [ ] **Step 8: Verify the locale JSON parses**
 
 Run: `node -e "for (const f of ['locale/zh.json','locale/en.json']) { JSON.parse(require('fs').readFileSync(f,'utf8')); console.log('ok', f) }"`
 Expected: `ok locale/zh.json` and `ok locale/en.json`.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add client.js locale/zh.json locale/en.json
