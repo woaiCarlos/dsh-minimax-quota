@@ -4241,60 +4241,237 @@ Render it inside `QuotaPanel`, after the weekly section and before the fetched-a
 - [ ] **Step 4: Add the notice marker to the pill**
 
 The payload's `models.added` lists every model the plugin has ever added, so it
-never empties. A badge driven by it alone would therefore never clear. The badge
-marks "there are models you did not add by hand" and disappears once the user
-has opened the panel in this page load; the panel itself always lists the whole
-set, so nothing is lost.
+never empties. A badge driven by it alone would therefore never clear, and a
+marker that lives in the component comes back on every conversation switch:
+the pill is mounted in the chat composer, so a switch mounts it again and the
+component's own state starts over.
 
-Add a piece of component state next to `open` in `MiniMaxQuotaPill`:
+So the badge counts what the user has not been told about yet, and the set of
+models the user *has* been told about lives in the browser's own storage, which
+survives a remount, a new conversation, a new tab and a restart of the app.
+
+The storage is guarded: it can be missing, it can throw when it is touched —
+some private browsing modes throw rather than answer `null` — and the value it
+holds can be corrupt. Every access degrades to the empty set instead of
+throwing, so the plugin keeps working when the storage does not. A write merges
+the new ids into what is already stored, so a model the user was told about
+earlier stays remembered.
+
+Add the storage key and the three helpers to `client.js`, beside the other
+helpers:
 
 ```js
-const [noticeSeen, setNoticeSeen] = React.useState(false)
+    // ── the models the user has been told about ───────────────────────────
+    /** The storage key that holds the ids of the models the user was told about. */
+    const SEEN_MODELS_KEY = 'dsh-minimax.seen-models'
+
+    /**
+     * The model ids the storage holds.
+     *
+     * The stored value is a JSON array of model ids. A value that is not
+     * such an array — or that is not JSON at all — holds nothing, so it is
+     * read as the empty set.
+     *
+     * @param storage - the browser's local storage.
+     * @returns `{ ok, ids }`: `ok` says whether the stored value could be
+     *   read at all, `ids` holds the model ids it names.
+     */
+    function storedSeenModels(storage) {
+      let raw
+      try {
+        raw = storage.getItem(SEEN_MODELS_KEY)
+      } catch {
+        // A storage that refuses to be read holds nothing that can be
+        // trusted, so a write must not replace it.
+        return { ok: false, ids: new Set() }
+      }
+      if (raw === null || raw === undefined) return { ok: true, ids: new Set() }
+      try {
+        const parsed = JSON.parse(raw)
+        if (!Array.isArray(parsed)) return { ok: true, ids: new Set() }
+        return { ok: true, ids: new Set(parsed.filter((id) => typeof id === 'string')) }
+      } catch {
+        // A corrupt value holds nothing, so it is read as the empty set and
+        // the next write repairs it.
+        return { ok: true, ids: new Set() }
+      }
+    }
+
+    /**
+     * The models the user has already been told about.
+     *
+     * The set lives in the browser's own storage, so it survives a remount,
+     * a new conversation, a new tab and a restart of the app — which is what
+     * the badge needs, because the pill is mounted in the chat composer and
+     * a conversation switch mounts it again.
+     *
+     * The storage can be missing, can throw when it is touched and can hold
+     * a corrupt value, so every access degrades to the empty set instead of
+     * throwing.
+     *
+     * @returns the set of seen model ids.
+     */
+    function readSeenModels() {
+      try {
+        const storage = window.localStorage
+        if (storage === null || storage === undefined) return new Set()
+        return storedSeenModels(storage).ids
+      } catch {
+        // Some private browsing modes throw when the storage is touched.
+        return new Set()
+      }
+    }
+
+    /**
+     * Remember the models the user has been told about.
+     *
+     * The write merges: the ids are added to what is already stored, so a
+     * model the user was told about earlier stays remembered. A storage that
+     * cannot be written to leaves the plugin working, just without the
+     * memory.
+     *
+     * @param ids - the model ids to remember.
+     */
+    function writeSeenModels(ids) {
+      if (!Array.isArray(ids) || ids.length === 0) return
+      try {
+        const storage = window.localStorage
+        if (storage === null || storage === undefined) return
+        const stored = storedSeenModels(storage)
+        // A value that could not be read is not replaced: the write would
+        // drop what is already stored.
+        if (!stored.ok) return
+        for (const id of ids) {
+          if (typeof id === 'string') stored.ids.add(id)
+        }
+        storage.setItem(SEEN_MODELS_KEY, JSON.stringify([...stored.ids]))
+      } catch {
+        // A storage that refuses to be written to leaves the plugin working.
+      }
+    }
+
 ```
 
-Compute the notice from the fetched payload:
+Replace the component's own `noticeSeen` flag with the set the browser
+remembers, and count what is left of it:
 
 ```js
-const hasNotice = !noticeSeen && (payload?.models?.added?.length ?? 0) > 0
+      const [seen, setSeen] = React.useState(() => readSeenModels())
+
 ```
 
-Mark it seen when the panel opens:
-
 ```js
-React.useEffect(() => {
-  if (open) setNoticeSeen(true)
-}, [open])
+      // The badge counts the models the plugin added that the user has not
+      // been told about yet. The plugin's own list of added models is
+      // cumulative, so the count — not the list — is what says whether
+      // there is news.
+      const addedModels = Array.isArray(payload?.models?.added) ? payload.models.added : []
+      const unseen = addedModels.filter((id) => !seen.has(id))
+
 ```
 
-Add the styles for the models section and the marker to the stylesheet the client installs, using only theme tokens:
+Opening the panel is the moment the user is told which models the plugin
+added, so they are marked as seen and remembered — also after the user opens a
+different conversation:
 
 ```js
-'.__mmq_models{margin-top:12px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1)}',
-'.__mmq_sectionTitle{font-weight:600;color:var(--dsw-alias-label-primary);margin-bottom:6px}',
-'.__mmq_modelList{display:flex;flex-wrap:wrap;gap:4px}',
-'.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
-'.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warn-label);font-size:11px}',
-'.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
-'.__mmq_badge{position:absolute;top:-2px;right:-2px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}',
-'.__mmq_pillWrap{position:relative;display:inline-flex}',
+      // Tell the user about the models the plugin added: they are marked as
+      // seen and remembered, so the badge stays away — also after the user
+      // opens a different conversation.
+      const markSeen = React.useCallback((ids) => {
+        const fresh = ids.filter((id) => !seen.has(id))
+        if (fresh.length === 0) return
+        const next = new Set(seen)
+        for (const id of fresh) next.add(id)
+        setSeen(next)
+        writeSeenModels(fresh)
+      }, [seen])
+
+      // Opening the panel is the moment the user is told which models the
+      // plugin added. The panel only shows once the status route answered,
+      // so the marking waits for the payload; a model that arrives while
+      // the panel is open is still news to the user.
+      React.useEffect(() => {
+        if (!open) {
+          toldRef.current = false
+          return
+        }
+        if (toldRef.current) return
+        if (payload === null) return
+        toldRef.current = true
+        markSeen(addedModels)
+      }, [open, payload])
+
+```
+
+The badge carries the number, and the locale string that already exists names
+it for a screen reader: `modelsAdded` reads "已自动补充 {count} 个新模型" /
+"{count} new model(s) added automatically", so no new string is needed. It is
+not `aria-hidden` any more, because it now carries a name:
+
+```js
+          // The badge is the number of models the user has not been told
+          // about, and it carries the locale string as its name, so a screen
+          // reader says what the number means.
+          unseen.length > 0
+            ? h(
+                'span',
+                {
+                  className: '__mmq_badge',
+                  'aria-label': t('modelsAdded', { count: unseen.length }),
+                },
+                unseen.length,
+              )
+            : null,
+
+```
+
+Add the styles for the models section and the badge to the stylesheet the
+client installs, using only theme tokens:
+
+```js
+      '.__mmq_models{margin-top:12px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.__mmq_sectionTitle{font-weight:600;color:var(--dsw-alias-label-primary);margin-bottom:6px}',
+      '.__mmq_modelList{display:flex;flex-wrap:wrap;gap:4px}',
+      '.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
+      '.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warn-label);font-size:11px}',
+      '.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
+      '.__mmq_badge{position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-on-color);font-size:10px;line-height:16px;text-align:center;font-variant-numeric:tabular-nums;pointer-events:none;align-items:center;justify-content:center;display:inline-flex}',
+      '.__mmq_pillWrap{position:relative;display:inline-flex}',
 ```
 
 Every CSS variable has to exist in the installed theme: `--dsw-alias-fill-l2` and
 `--dsw-alias-state-warning` do not, so the chip uses `--dsw-alias-bg-layer-2` and the notice uses
-`--dsw-alias-state-warn-label`.
+`--dsw-alias-state-warn-label`. The badge is a chip that fits a number rather
+than a dot, it sits on the corner of the pill, and it takes no pointer events,
+so the pill stays clickable underneath it.
 
-Render the badge inside a wrapper around the pill's existing content, and render it
-only while `hasNotice` is true:
+Render the badge inside the `__mmq_pillWrap` span that wraps the pill's button,
+and render it only while there is something to count. Keep the pill's own
+`__mmq_pill` class on the button, so the existing layout is unchanged.
+
+**Opening the panel reads the status once.** The panel can show a reading that
+is up to a minute old, because the poll runs on a timer and opening the panel
+does not read the status. The read is the one the module already has — it
+shares one in-flight read across the page — and it is not cached: the quota has
+to reach MiniMax on every read. Closing the panel needs no reading, because it
+is about to disappear:
 
 ```js
-h('span', { className: '__mmq_pillWrap' },
-  existingPillButton,
-  hasNotice ? h('span', { className: '__mmq_badge', 'aria-hidden': true }) : null,
-)
+              onClick: () => {
+                const opening = !open
+                setOpen(opening)
+                // Opening is the moment the user wants the freshest reading,
+                // so the status route is read once. The read is not cached:
+                // the quota has to reach MiniMax every time. Closing the
+                // panel needs no reading, because it is about to disappear.
+                if (opening) {
+                  readStatus().then((result) => {
+                    setPayload(result)
+                  })
+                }
+              },
 ```
-
-Keep the pill's own `__mmq_pill` class on the button, so the existing layout is
-unchanged.
 
 - [ ] **Step 5: Add the locale strings**
 
@@ -4728,15 +4905,83 @@ async function flush(rounds = 20) {
 }
 
 /**
+ * A local storage double.
+ *
+ * The browser half remembers the models the user has been told about in the
+ * browser's own storage, so a test needs one to look at — and one that
+ * misbehaves, because a real browser's storage can be missing or can throw.
+ *
+ * @param options - `{ mode }`: `ok` stores the values, `missing` has no
+ *   storage at all, `throw` throws when the storage is touched, and
+ *   `failing` has a storage whose every method throws.
+ * @returns the storage double.
+ */
+function createStorage({ mode = 'ok' } = {}) {
+  if (mode === 'missing') {
+    return {
+      mode,
+      install() {},
+    }
+  }
+  if (mode === 'throw') {
+    return {
+      mode,
+      install(target) {
+        // Some private browsing modes throw when the storage is touched.
+        Object.defineProperty(target, 'localStorage', {
+          get() {
+            throw new Error('the storage is blocked')
+          },
+          enumerable: true,
+          configurable: true,
+        })
+      },
+    }
+  }
+  if (mode === 'failing') {
+    const storage = {
+      mode,
+      getItem() {
+        throw new Error('the storage is blocked')
+      },
+      setItem() {
+        throw new Error('the storage is blocked')
+      },
+      install(target) {
+        target.localStorage = storage
+      },
+    }
+    return storage
+  }
+  const values = new Map()
+  const storage = {
+    mode,
+    values,
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null
+    },
+    setItem(key, value) {
+      values.set(key, String(value))
+    },
+    install(target) {
+      target.localStorage = storage
+    },
+  }
+  return storage
+}
+
+/**
  * Load the browser half the way the Harness loads it.
  *
  * The module registers itself with the page's module loader, so the fake
  * loader captures it and the test calls its factory with a stand-in for the
  * module registry.
  *
+ * @param options - `{ storage }`: the local storage double to install on
+ *   the fake window.
  * @returns `{ module, window }`.
  */
-async function loadClient() {
+async function loadClient({ storage } = {}) {
   const source = await readFile(CLIENT_PATH, 'utf8')
   let captured = null
   const timers = new Map()
@@ -4760,6 +5005,7 @@ async function loadClient() {
     innerWidth: 1280,
     innerHeight: 800,
   }
+  if (storage !== undefined) storage.install(fakeWindow)
   const fakeDocument = {
     querySelector: () => null,
     createElement: () => ({ dataset: {}, setAttribute() {}, textContent: '' }),
@@ -4796,12 +5042,12 @@ function statusPayload({
 /**
  * Mount the pill the browser half registers.
  *
- * @param options - `{ fetchImpl }`.
+ * @param options - `{ fetchImpl, storage }`.
  * @returns the mounted pill: a function that renders it, the dictionaries
  *   it registered, and the requests it made.
  */
-async function mountPill({ fetchImpl }) {
-  const { module } = await loadClient()
+async function mountPill({ fetchImpl, storage }) {
+  const { module } = await loadClient({ storage })
   const { React, render, unmount } = createReact()
   const ReactDOM = {
     createPortal: (node, container) => ({ node, container }),
@@ -4838,8 +5084,9 @@ async function mountPill({ fetchImpl }) {
   const props = {
     useProjection: () => ({ next: { provider: 'minimax-cn', model: 'MiniMax-M3' } }),
     // The Harness locale service answers an unregistered key with the key
-    // name itself, so the test reads the key.
-    t: (key) => key,
+    // name itself, so the test reads the key. A key that takes parameters
+    // carries them along, so a test can see the count.
+    t: (key, params) => (params === undefined ? key : `${key} ${JSON.stringify(params)}`),
   }
   const originalFetch = globalThis.fetch
   globalThis.fetch = fetchImpl
@@ -5028,24 +5275,1087 @@ test('the locale dictionaries and the locale files carry the same keys', async (
     pill.dispose()
   }
 })
+
+/**
+ * A status payload that reports the given added models.
+ *
+ * @param added - the model ids the plugin added.
+ * @returns the payload.
+ */
+function addedPayload(added) {
+  return statusPayload({
+    models: {
+      synced: ['MiniMax-M3', ...added],
+      added,
+      syncedAt: null,
+    },
+  })
+}
+
+test('the badge shows how many models the user has not been told about', async () => {
+  const storage = createStorage()
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5', 'MiniMax-M3.1'])), { status: 200 }),
+  })
+  try {
+    const tree = await settle(pill)
+    const badge = byClass(tree, '__mmq_badge')
+    assert.ok(badge !== undefined, 'the badge did not render')
+    // The badge is the number, not a dot.
+    assert.equal(textOf(badge), '2')
+    // And it is not a mystery: it carries the locale string as its name.
+    assert.ok(String(badge.props['aria-label']).includes('modelsAdded'))
+    assert.ok(String(badge.props['aria-label']).includes('2'))
+    assert.equal(badge.props['aria-hidden'], undefined)
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('opening the panel clears the badge and remembers it', async () => {
+  const storage = createStorage()
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5'])), { status: 200 }),
+  })
+  try {
+    let tree = await settle(pill)
+    assert.ok(byClass(tree, '__mmq_badge') !== undefined, 'the badge did not render')
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge stayed after the panel opened')
+    // The models are remembered, so the next mount does not show them again.
+    const stored = JSON.parse(storage.values.get('dsh-minimax.seen-models'))
+    assert.deepEqual(stored, ['MiniMax-M2.5'])
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('a remount does not bring the badge back', async () => {
+  const storage = createStorage()
+  const fetchImpl = async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5'])), { status: 200 })
+  const first = await mountPill({ storage, fetchImpl })
+  try {
+    let tree = await settle(first)
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = first.render()
+    await flush()
+    tree = first.render()
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge stayed after the panel opened')
+  } finally {
+    first.dispose()
+  }
+  // A fresh component instance — a new conversation, a new tab — reads the
+  // same storage, so the badge stays away.
+  const second = await mountPill({ storage, fetchImpl })
+  try {
+    const tree = await settle(second)
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge came back after a remount')
+  } finally {
+    second.dispose()
+  }
+})
+
+test('a model added after the panel was opened brings the badge back', async () => {
+  const storage = createStorage()
+  let added = ['MiniMax-M2.5']
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async (url, init) => {
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify({ ok: true, added: ['MiniMax-M3.1'] }), { status: 200 })
+      }
+      return new Response(JSON.stringify(addedPayload(added)), { status: 200 })
+    },
+  })
+  try {
+    let tree = await settle(pill)
+    assert.equal(textOf(byClass(tree, '__mmq_badge')), '1')
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge stayed after the panel opened')
+    // The Host adds a model; the panel's sync button asks for a fresh list.
+    added = ['MiniMax-M2.5', 'MiniMax-M3.1']
+    const syncButton = byClass(tree, '__mmq_syncButton')
+    assert.ok(syncButton !== undefined, 'the sync button did not render')
+    syncButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    const badge = byClass(tree, '__mmq_badge')
+    assert.ok(badge !== undefined, 'the badge did not come back for the new model')
+    // Only the model the user has not been told about counts.
+    assert.equal(textOf(badge), '1')
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('a storage that is missing or that throws does not break the plugin', async () => {
+  for (const mode of ['missing', 'throw', 'failing']) {
+    const storage = createStorage({ mode })
+    const pill = await mountPill({
+      storage,
+      fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5'])), { status: 200 }),
+    })
+    try {
+      let tree = await settle(pill)
+      // The pill renders…
+      assert.ok(byClass(tree, '__mmq_pill') !== undefined, `the pill did not render with the ${mode} storage`)
+      // …and the badge is still there, because nothing was remembered.
+      const badge = byClass(tree, '__mmq_badge')
+      assert.ok(badge !== undefined, `the badge did not render with the ${mode} storage`)
+      assert.equal(textOf(badge), '1')
+      // Opening the panel must not throw either.
+      byClass(tree, '__mmq_pill').props.onClick()
+      await flush()
+      tree = pill.render()
+      await flush()
+      tree = pill.render()
+      assert.ok(byClass(tree, '__mmq_panel') !== undefined, `the panel did not open with the ${mode} storage`)
+    } finally {
+      pill.dispose()
+    }
+  }
+})
+
+test('opening the panel reads the status once', async () => {
+  const requests = []
+  const pill = await mountPill({
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), method: init?.method ?? 'GET' })
+      return new Response(JSON.stringify(statusPayload()), { status: 200 })
+    },
+  })
+  try {
+    let tree = await settle(pill)
+    const before = requests.length
+    // Opening the panel is the moment the user wants the freshest reading.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    assert.equal(requests.length, before + 1, 'opening the panel did not read the status once')
+    // Closing it needs no reading: the panel is about to disappear.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    assert.equal(requests.length, before + 1, 'closing the panel read the status again')
+  } finally {
+    pill.dispose()
+  }
+})
 ```
 
-The four tests cover the four things a user would notice: a failed manual sync leaves an error line
-in the panel, that line survives a status route that failed as well, the panel opens even when the
-quota could not be read, and a successful manual sync refreshes the model list right away instead of
-waiting for the next poll.
+The four tests cover the four things a user would notice```
 
-- [ ] **Step 9: Run the checks**
+The eleven tests cover the things a user would notice: a failed manual sync leaves an error line
+in the panel, that line survives a status route that failed as well, the panel opens even when the
+quota could not be read, a successful manual sync refreshes the model list right away instead of
+waiting for the next poll, and the locale files and the inline dictionaries agree. The six the
+notice marker needs are the rest: the badge counts the models the user has not been told about,
+opening the panel clears it and remembers the models, a fresh component instance — a new
+conversation — does not bring it back, a model the plugin adds later brings it back with the new
+count, a storage that is missing or that throws leaves the plugin working, and opening the panel
+reads the status once.
+
+The storage double is part of the test, because the browser half has to survive a storage that
+does not work: `missing` has no storage at all, `throw` throws when the storage is touched — some
+private browsing modes do — and `failing` has a storage whose every method throws.
+
+- [ ] **Step 9: The browser half as committed**
+
+The plan carries the committed file, byte for byte, so the plan and the code cannot drift apart:
+
+```js
+/**
+ * Browser half of the MiniMax quota bundle.
+ *
+ * Registers one entry in `conversation.composer.dock`: when the session's
+ * selected model belongs to the MiniMax family, it shows the remaining 5-hour
+ * and weekly coding-plan quota, and clicking it opens a details panel.
+ *
+ * Nothing confidential reaches the browser: the Host answers same-origin
+ * routes with the quota view and the model summary, and this half only
+ * talks to those routes.
+ */
+window.__ModuleLoader__.load({
+  id: 'dsh-minimax',
+  factory(require) {
+    const React = require('react')
+    const h = React.createElement
+    const ReactDOM = require('react-dom')
+
+    // ── locale ────────────────────────────────────────────────────────────
+    const NS = 'minimaxQuota'
+    const zh = {
+      intervalLabel: '5小时',
+      weeklyLabel: '周',
+      remaining: '剩余 {percent}%',
+      intervalReset: '5 小时窗口将于 {when} 重置',
+      weeklyReset: '周窗口将于 {when} 重置',
+      noWeeklyLimit: '当前套餐没有周额度限制。',
+      unavailable: '无法获取 MiniMax 额度',
+      missingCredential: '尚未配置 MiniMax 凭据。',
+      requestFailed: '无法连接 MiniMax：{message}',
+      loading: '正在读取 MiniMax 额度…',
+      panelTitle: 'MiniMax 额度',
+      panelSubtitle: '编程套餐剩余额度',
+      used: '已使用 {percent}%',
+      panelIntervalTitle: '5 小时窗口',
+      panelWeeklyTitle: '周窗口',
+      panelResetIn: '距离重置还有 {duration}',
+      panelFetchedAt: '更新于 {when}',
+      panelModel: '模型分组：{name}',
+      modelsTitle: '已同步的模型',
+      modelsAdded: '已自动补充 {count} 个新模型',
+      modelsSyncedAt: '模型列表更新于 {when}',
+      modelsSync: '立即同步',
+      modelsSyncing: '同步中…',
+      modelsSyncFailed: '同步失败：{reason}',
+      daily: '{days} 天 {hours} 小时',
+      hours: '{hours} 小时 {minutes} 分钟',
+      minutes: '{minutes} 分钟',
+      seconds: '{seconds} 秒',
+    }
+    const en = {
+      intervalLabel: '5h',
+      weeklyLabel: 'Week',
+      remaining: '{percent}% left',
+      intervalReset: '5-hour window resets {when}',
+      weeklyReset: 'Weekly window resets {when}',
+      noWeeklyLimit: 'This plan has no weekly limit.',
+      unavailable: 'MiniMax quota unavailable',
+      missingCredential: 'No MiniMax credential is configured.',
+      requestFailed: 'Could not reach MiniMax: {message}',
+      loading: 'Reading MiniMax quota…',
+      panelTitle: 'MiniMax quota',
+      panelSubtitle: 'Coding plan remaining',
+      used: '{percent}% used',
+      panelIntervalTitle: '5-hour window',
+      panelWeeklyTitle: 'Weekly window',
+      panelResetIn: 'Resets in {duration}',
+      panelFetchedAt: 'Updated {when}',
+      panelModel: 'Model bucket: {name}',
+      modelsTitle: 'Synced models',
+      modelsAdded: '{count} new model(s) added automatically',
+      modelsSyncedAt: 'Model list updated at {when}',
+      modelsSync: 'Sync now',
+      modelsSyncing: 'Syncing…',
+      modelsSyncFailed: 'Sync failed: {reason}',
+      daily: '{days}d {hours}h',
+      hours: '{hours}h {minutes}m',
+      minutes: '{minutes}m',
+      seconds: '{seconds}s',
+    }
+
+    // ── styles (theme tokens only) ────────────────────────────────────────
+    const CSS = [
+      '.__mmq_anchor{min-width:0;font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));display:inline-flex}',
+      '.__mmq_pill{box-sizing:border-box;border-radius:var(--dsw-radius-sm);max-width:100%;color:var(--dsw-alias-label-tertiary);font:inherit;font-variant-numeric:tabular-nums;line-height:inherit;white-space:nowrap;background:0 0;border:none;align-items:center;gap:6px;padding:1px 8px;display:inline-flex;cursor:pointer}',
+      '.__mmq_pill:hover,.__mmq_pill:focus-visible,.__mmq_pill[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}',
+      '.__mmq_pill svg{flex:none;width:14px;height:14px}',
+      '.__mmq_label{text-overflow:ellipsis;min-width:0;overflow:hidden}',
+      '.__mmq_sep{color:var(--dsw-alias-border-l2);margin:0 6px}',
+      '.__mmq_group{display:inline-flex;align-items:center;gap:4px}',
+      '.__mmq_dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-state-success-primary)}',
+      '.__mmq_dotLow{background:var(--dsw-alias-state-warn-primary)}',
+      '.__mmq_dotCritical{background:var(--dsw-alias-state-error-primary)}',
+      '.__mmq_panel{z-index:1100;box-sizing:border-box;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);backdrop-filter:var(--dsw-menu-backdrop-filter);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-secondary);cursor:default;border:0;padding:16px;font-size:12px;line-height:18px;position:fixed;pointer-events:none}',
+      '.__mmq_title{color:var(--dsw-alias-label-primary);justify-content:space-between;gap:16px;margin-bottom:8px;font-weight:500;display:flex}',
+      '.__mmq_titleRule{border-top:.5px solid var(--dsw-alias-border-l2);margin-bottom:10px}',
+      '.__mmq_titleLabel{align-items:center;gap:6px;min-width:0;display:inline-flex}',
+      '.__mmq_titleLabel svg{flex:none;width:14px;height:14px}',
+      '.__mmq_subtitle{color:var(--dsw-alias-label-tertiary);margin:0 0 10px}',
+      '.__mmq_rows{display:flex;flex-direction:column;gap:10px}',
+      '.__mmq_row{display:flex;flex-direction:column;gap:4px}',
+      '.__mmq_rowHead{display:flex;justify-content:space-between;align-items:baseline;gap:12px}',
+      '.__mmq_rowName{color:var(--dsw-alias-label-secondary);font-weight:500}',
+      '.__mmq_rowValue{color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}',
+      '.__mmq_bar{height:4px;border-radius:2px;background:var(--dsw-alias-bg-layer-3);overflow:hidden}',
+      '.__mmq_barFill{height:100%;border-radius:2px;background:var(--dsw-alias-state-success-primary)}',
+      '.__mmq_barFillLow{background:var(--dsw-alias-state-warn-primary)}',
+      '.__mmq_barFillCritical{background:var(--dsw-alias-state-error-primary)}',
+      '.__mmq_hint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
+      '.__mmq_error{color:var(--dsw-alias-state-error-primary)}',
+      '.__mmq_models{margin-top:12px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.__mmq_sectionTitle{font-weight:600;color:var(--dsw-alias-label-primary);margin-bottom:6px}',
+      '.__mmq_modelList{display:flex;flex-wrap:wrap;gap:4px}',
+      '.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
+      '.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warn-label);font-size:11px}',
+      '.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
+      '.__mmq_syncButton{margin-top:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);padding:2px 8px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;cursor:pointer;pointer-events:auto}',
+      '.__mmq_syncButton:disabled{opacity:.6;cursor:default}',
+      '.__mmq_badge{position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-on-color);font-size:10px;line-height:16px;text-align:center;font-variant-numeric:tabular-nums;pointer-events:none;align-items:center;justify-content:center;display:inline-flex}',
+      '.__mmq_pillWrap{position:relative;display:inline-flex}',
+    ].join('')
+
+    function installStyles() {
+      if (typeof document === 'undefined') return
+      const tagId = 'dsh-minimax/client.css'
+      if (document.querySelector(`style[data-plugin-css=${JSON.stringify(tagId)}]`) !== null) return
+      const tag = document.createElement('style')
+      tag.dataset.plugin = 'dsh-minimax'
+      tag.dataset.pluginCss = tagId
+      tag.textContent = CSS
+      document.head.appendChild(tag)
+    }
+
+    // ── helpers ───────────────────────────────────────────────────────────
+    /** The route that answers the quota view and the model summary. */
+    const STATUS_ROUTE = '/plugin/minimax/status'
+
+    /** The route that asks the Host for a model sync. */
+    const SYNC_ROUTE = '/plugin/minimax/sync'
+
+    /** Providers whose routes serve the MiniMax model family. */
+    function isMiniMaxProvider(provider) {
+      if (typeof provider !== 'string') return false
+      const id = provider.toLowerCase()
+      return id.includes('minimax')
+    }
+
+    /** Whether one selected model id belongs to the MiniMax family. */
+    function isMiniMaxModel(model) {
+      if (typeof model !== 'string') return false
+      return model.toLowerCase().includes('minimax')
+    }
+
+    /** Whether the current selection should show the quota entry. */
+    function selectionIsMiniMax(selection) {
+      if (selection == null) return false
+      return isMiniMaxProvider(selection.provider) || isMiniMaxModel(selection.model)
+    }
+
+    /** Format a millisecond duration as a coarse, human-readable span. */
+    function formatDuration(ms, t) {
+      if (!Number.isFinite(ms) || ms <= 0) return t('seconds', { seconds: 0 })
+      const totalMinutes = Math.floor(ms / 60000)
+      const days = Math.floor(totalMinutes / 1440)
+      const hours = Math.floor((totalMinutes % 1440) / 60)
+      const minutes = totalMinutes % 60
+      const seconds = Math.floor((ms % 60000) / 1000)
+      if (days > 0) return t('daily', { days, hours })
+      if (hours > 0) return t('hours', { hours, minutes })
+      if (minutes > 0) return t('minutes', { minutes })
+      return t('seconds', { seconds })
+    }
+
+    /** Format an epoch-millisecond instant as a local clock time. */
+    function formatClock(epochMs) {
+      if (!Number.isFinite(epochMs)) return '—'
+      try {
+        return new Date(epochMs).toLocaleTimeString()
+      } catch {
+        return '—'
+      }
+    }
+
+    /** The severity class for a remaining percentage, used by the small dot. */
+    function severityClass(percent) {
+      if (percent === null) return ''
+      if (percent <= 15) return ' __mmq_critical'
+      if (percent <= 40) return ' __mmq_low'
+      return ''
+    }
+
+    /** The severity class for the wide bar, whose fill carries its own class. */
+    function barSeverityClass(percent) {
+      if (percent === null) return ''
+      if (percent <= 15) return ' __mmq_barFillCritical'
+      if (percent <= 40) return ' __mmq_barFillLow'
+      return ''
+    }
+
+    // ── the models the user has been told about ───────────────────────────
+    /** The storage key that holds the ids of the models the user was told about. */
+    const SEEN_MODELS_KEY = 'dsh-minimax.seen-models'
+
+    /**
+     * The model ids the storage holds.
+     *
+     * The stored value is a JSON array of model ids. A value that is not
+     * such an array — or that is not JSON at all — holds nothing, so it is
+     * read as the empty set.
+     *
+     * @param storage - the browser's local storage.
+     * @returns `{ ok, ids }`: `ok` says whether the stored value could be
+     *   read at all, `ids` holds the model ids it names.
+     */
+    function storedSeenModels(storage) {
+      let raw
+      try {
+        raw = storage.getItem(SEEN_MODELS_KEY)
+      } catch {
+        // A storage that refuses to be read holds nothing that can be
+        // trusted, so a write must not replace it.
+        return { ok: false, ids: new Set() }
+      }
+      if (raw === null || raw === undefined) return { ok: true, ids: new Set() }
+      try {
+        const parsed = JSON.parse(raw)
+        if (!Array.isArray(parsed)) return { ok: true, ids: new Set() }
+        return { ok: true, ids: new Set(parsed.filter((id) => typeof id === 'string')) }
+      } catch {
+        // A corrupt value holds nothing, so it is read as the empty set and
+        // the next write repairs it.
+        return { ok: true, ids: new Set() }
+      }
+    }
+
+    /**
+     * The models the user has already been told about.
+     *
+     * The set lives in the browser's own storage, so it survives a remount,
+     * a new conversation, a new tab and a restart of the app — which is what
+     * the badge needs, because the pill is mounted in the chat composer and
+     * a conversation switch mounts it again.
+     *
+     * The storage can be missing, can throw when it is touched and can hold
+     * a corrupt value, so every access degrades to the empty set instead of
+     * throwing.
+     *
+     * @returns the set of seen model ids.
+     */
+    function readSeenModels() {
+      try {
+        const storage = window.localStorage
+        if (storage === null || storage === undefined) return new Set()
+        return storedSeenModels(storage).ids
+      } catch {
+        // Some private browsing modes throw when the storage is touched.
+        return new Set()
+      }
+    }
+
+    /**
+     * Remember the models the user has been told about.
+     *
+     * The write merges: the ids are added to what is already stored, so a
+     * model the user was told about earlier stays remembered. A storage that
+     * cannot be written to leaves the plugin working, just without the
+     * memory.
+     *
+     * @param ids - the model ids to remember.
+     */
+    function writeSeenModels(ids) {
+      if (!Array.isArray(ids) || ids.length === 0) return
+      try {
+        const storage = window.localStorage
+        if (storage === null || storage === undefined) return
+        const stored = storedSeenModels(storage)
+        // A value that could not be read is not replaced: the write would
+        // drop what is already stored.
+        if (!stored.ok) return
+        for (const id of ids) {
+          if (typeof id === 'string') stored.ids.add(id)
+        }
+        storage.setItem(SEEN_MODELS_KEY, JSON.stringify([...stored.ids]))
+      } catch {
+        // A storage that refuses to be written to leaves the plugin working.
+      }
+    }
+
+    // ── status fetching ────────────────────────────────────────────────────
+    /**
+     * One in-flight status read shared by every subscriber of this page, so a
+     * remount does not multiply upstream calls.
+     */
+    let pending = null
+
+    /** How often the reading refreshes while a MiniMax model is selected. */
+    const REFRESH_INTERVAL_MS = 60_000
+
+    /**
+     * The quota view of a status payload.
+     *
+     * A payload without a quota is malformed, so it reads as the failure the
+     * browser already knows how to show.
+     *
+     * @param payload - the status payload.
+     * @returns the quota view.
+     */
+    function quotaView(payload) {
+      return payload?.quota ?? { ok: false, reason: 'request-failed', message: 'Malformed response.' }
+    }
+
+    /**
+     * The line the panel shows when a manual sync did not work.
+     *
+     * The Host answers with a fixed reason and never with an internal
+     * message, so the reason is all the browser can show.
+     *
+     * @param reason - why the sync failed.
+     * @param t - the locale function.
+     * @returns the line to show.
+     */
+    function syncFailureText(reason, t) {
+      if (reason === 'missing-credential') return t('missingCredential')
+      return t('modelsSyncFailed', { reason })
+    }
+
+    /**
+     * Read the status route: the quota view and the model summary.
+     *
+     * @returns a promise for `{ quota, models }`.
+     */
+    function readStatus() {
+      if (pending !== null) return pending
+      pending = fetch(STATUS_ROUTE, { headers: { accept: 'application/json' } })
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const payload = await response.json()
+          return { quota: quotaView(payload), models: payload?.models }
+        })
+        .catch((error) => ({
+          quota: {
+            ok: false,
+            reason: 'request-failed',
+            message: error instanceof Error ? error.message : String(error),
+          },
+          models: undefined,
+        }))
+        .finally(() => {
+          pending = null
+        })
+      return pending
+    }
+
+    // ── components ─────────────────────────────────────────────────────────
+    /** The gauge mark shown ahead of the quota numbers. */
+    function QuotaIcon() {
+      return h(
+        'svg',
+        {
+          viewBox: '0 0 24 24',
+          width: 14,
+          height: 14,
+          fill: 'none',
+          'aria-hidden': true,
+        },
+        h('circle', {
+          cx: 12,
+          cy: 12,
+          r: 8.5,
+          stroke: 'currentColor',
+          strokeWidth: 2,
+          opacity: 0.35,
+        }),
+        h('path', {
+          d: 'M12 3.5a8.5 8.5 0 0 1 7.36 4.25',
+          stroke: 'currentColor',
+          strokeWidth: 2,
+          strokeLinecap: 'round',
+        }),
+      )
+    }
+
+    /**
+     * The anchored panel: one card per quota window, each with a bar and
+     * the moment its window resets, the models section, and the line that
+     * reports a failed manual sync.
+     */
+    function QuotaPanel({ view, models, t, style, panelRef, onSync, syncing, syncError }) {
+      const rows = []
+      // A quota that could not be read carries no percentages at all, so its
+      // windows are absent rather than zero.
+      const interval = view.ok === true ? view.intervalRemainingPercent : null
+      const weekly = view.ok === true ? view.weeklyRemainingPercent : null
+      if (interval !== null) {
+        rows.push(
+          h(
+            'div',
+            { className: '__mmq_row', key: 'interval' },
+            h(
+              'div',
+              { className: '__mmq_rowHead' },
+              h('span', { className: '__mmq_rowName' }, t('panelIntervalTitle')),
+              h(
+                'span',
+                { className: '__mmq_rowValue' },
+                t('remaining', { percent: interval }),
+              ),
+            ),
+            h(
+              'div',
+              { className: '__mmq_bar' },
+              h('div', {
+                className: `__mmq_barFill${barSeverityClass(interval)}`,
+                style: { width: `${Math.max(0, Math.min(100, interval))}%` },
+              }),
+            ),
+            h(
+              'div',
+              { className: '__mmq_hint' },
+              t('panelResetIn', {
+                duration: formatDuration(view.intervalResetAt - Date.now(), t),
+              }),
+            ),
+          ),
+        )
+      }
+      if (weekly !== null) {
+        rows.push(
+          h(
+            'div',
+            { className: '__mmq_row', key: 'weekly' },
+            h(
+              'div',
+              { className: '__mmq_rowHead' },
+              h('span', { className: '__mmq_rowName' }, t('panelWeeklyTitle')),
+              h(
+                'span',
+                { className: '__mmq_rowValue' },
+                t('remaining', { percent: weekly }),
+              ),
+            ),
+            h(
+              'div',
+              { className: '__mmq_bar' },
+              h('div', {
+                className: `__mmq_barFill${barSeverityClass(weekly)}`,
+                style: { width: `${Math.max(0, Math.min(100, weekly))}%` },
+              }),
+            ),
+            h(
+              'div',
+              { className: '__mmq_hint' },
+              t('panelResetIn', {
+                duration: formatDuration(view.weeklyResetAt - Date.now(), t),
+              }),
+            ),
+          ),
+        )
+      }
+      if (view.ok !== true) {
+        // The quota could not be read, so the panel says why instead of
+        // claiming the plan has no limit.
+        rows.push(h('div', { className: '__mmq_error' }, view.reason === 'missing-credential'
+          ? t('missingCredential')
+          : t('requestFailed', { message: view.message ?? '' })))
+      } else if (rows.length === 0) {
+        rows.push(h('div', { className: '__mmq_hint' }, t('noWeeklyLimit')))
+      }
+      return h(
+        'div',
+        {
+          ref: panelRef,
+          className: '__mmq_panel',
+          role: 'dialog',
+          'aria-label': t('panelTitle'),
+          style,
+        },
+        h(
+          'div',
+          { className: '__mmq_title' },
+          h(
+            'span',
+            { className: '__mmq_titleLabel' },
+            h(QuotaIcon, null),
+            t('panelTitle'),
+          ),
+        ),
+        h('div', { className: '__mmq_titleRule', 'aria-hidden': true }),
+        h('p', { className: '__mmq_subtitle' }, t('panelSubtitle')),
+        h('div', { className: '__mmq_rows' }, rows),
+        h(ModelsPanel, { models, t, onSync, syncing }),
+        // The sync failure belongs to the panel and not to the models
+        // section: the section disappears when the status route did not
+        // answer, and a failed manual sync has to reach the user even then.
+        syncError ? h('div', { className: '__mmq_error', style: { marginTop: '8px' } }, syncError) : null,
+        h(
+          'div',
+          { className: '__mmq_hint', style: { marginTop: '10px' } },
+          t('panelFetchedAt', { when: formatClock(view.fetchedAt) }),
+        ),
+      )
+    }
+
+    /**
+     * The models section: the ids the profile currently holds, how many of
+     * them the plugin added, the moment the list was last written, and the
+     * button that asks the Host for a fresh sync.
+     *
+     * The section never edits the list itself: the plugin appends and never
+     * edits, so the models it added are the user's to keep or to remove by
+     * hand. The button only asks; the sync itself runs on the Host.
+     *
+     * The section shows even when no model has been synced yet, so the sync
+     * button is reachable in exactly the state where it is most useful.
+     *
+     * The section is absent when the status route did not answer, so the
+     * line that reports a failed manual sync belongs to the panel.
+     */
+    function ModelsPanel({ models, t, onSync, syncing }) {
+      if (models === undefined) return null
+      const synced = Array.isArray(models.synced) ? models.synced : []
+      const added = Array.isArray(models.added) ? models.added : []
+      return h('div', { className: '__mmq_models' },
+        h('div', { className: '__mmq_sectionTitle' }, t('modelsTitle')),
+        synced.length > 0
+          ? h('div', { className: '__mmq_modelList' },
+              synced.map((id) => h('span', { className: '__mmq_modelChip', key: id }, id)),
+            )
+          : null,
+        added.length > 0
+          ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
+          : null,
+        models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
+        onSync
+          ? h('button', {
+              className: '__mmq_syncButton',
+              type: 'button',
+              disabled: syncing === true,
+              onClick: onSync,
+            }, syncing === true ? t('modelsSyncing') : t('modelsSync'))
+          : null,
+      )
+    }
+
+    /**
+     * The dock entry: a compact reading with a click-opened panel carrying
+     * the detail.
+     */
+    function MiniMaxQuotaPill(props) {
+      const { useProjection, t } = props
+      const selection = useProjection('modelSelection')
+      const current = selection?.next ?? selection?.lastUsed ?? null
+      const active = selectionIsMiniMax(current)
+      const [payload, setPayload] = React.useState(null)
+      const [open, setOpen] = React.useState(false)
+      const [seen, setSeen] = React.useState(() => readSeenModels())
+      const [syncing, setSyncing] = React.useState(false)
+      const [syncError, setSyncError] = React.useState(null)
+      const [position, setPosition] = React.useState(null)
+      const rootRef = React.useRef(null)
+      const panelRef = React.useRef(null)
+      // Whether the models of this panel opening have been told already.
+      const toldRef = React.useRef(false)
+
+      // The status route answers both halves: the quota the pill shows and
+      // the model summary the panel lists.
+      const view = payload?.quota ?? null
+      const models = payload?.models
+
+      // The sync probes the candidates MiniMax offers, which can take a
+      // while, so the button asks and waits for the answer. The Host answers
+      // HTTP 200 with `{"ok":false}` when the sync failed, so the payload is
+      // what says whether the sync worked.
+      const syncNow = async () => {
+        if (syncing) return
+        setSyncing(true)
+        setSyncError(null)
+        try {
+          const response = await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+          const body = await response.json().catch(() => null)
+          if (!response.ok || body?.ok !== true) {
+            setSyncError(syncFailureText(body?.reason ?? `HTTP ${response.status}`, t))
+          }
+        } catch (error) {
+          // A failed request leaves the model list as it was, but the user
+          // has to see that the sync did not happen.
+          setSyncError(syncFailureText(error instanceof Error ? error.message : String(error), t))
+        } finally {
+          setSyncing(false)
+          // The status route is the only thing that reports the model list,
+          // so the panel is refreshed right away instead of waiting for the
+          // next poll.
+          readStatus().then((result) => setPayload(result))
+        }
+      }
+
+      // Read the quota whenever a MiniMax model is the active selection, and
+      // refresh it on a slow cadence so the reading stays current.
+      React.useEffect(() => {
+        if (!active) {
+          setPayload(null)
+          return undefined
+        }
+        let alive = true
+        const refresh = () => {
+          readStatus().then((result) => {
+            if (alive) setPayload(result)
+          })
+        }
+        refresh()
+        const timer = window.setInterval(refresh, REFRESH_INTERVAL_MS)
+        return () => {
+          alive = false
+          window.clearInterval(timer)
+        }
+      }, [active, current?.provider, current?.model])
+
+      // The badge counts the models the plugin added that the user has not
+      // been told about yet. The plugin's own list of added models is
+      // cumulative, so the count — not the list — is what says whether
+      // there is news.
+      const addedModels = Array.isArray(payload?.models?.added) ? payload.models.added : []
+      const unseen = addedModels.filter((id) => !seen.has(id))
+
+      // Tell the user about the models the plugin added: they are marked as
+      // seen and remembered, so the badge stays away — also after the user
+      // opens a different conversation.
+      const markSeen = React.useCallback((ids) => {
+        const fresh = ids.filter((id) => !seen.has(id))
+        if (fresh.length === 0) return
+        const next = new Set(seen)
+        for (const id of fresh) next.add(id)
+        setSeen(next)
+        writeSeenModels(fresh)
+      }, [seen])
+
+      // Opening the panel is the moment the user is told which models the
+      // plugin added. The panel only shows once the status route answered,
+      // so the marking waits for the payload; a model that arrives while
+      // the panel is open is still news to the user.
+      React.useEffect(() => {
+        if (!open) {
+          toldRef.current = false
+          return
+        }
+        if (toldRef.current) return
+        if (payload === null) return
+        toldRef.current = true
+        markSeen(addedModels)
+      }, [open, payload])
+
+      // Place the panel above the trigger, inside the viewport. The panel is
+      // portaled into the document body, so its node attaches after this
+      // effect's first pass; a callback ref places it once the node exists.
+      const placePanel = React.useCallback(() => {
+        const anchor = rootRef.current
+        const panel = panelRef.current
+        if (anchor === null || panel === null) return
+        const rect = anchor.getBoundingClientRect()
+        const size = panel.getBoundingClientRect()
+        const margin = 12
+        let left = rect.left + rect.width / 2 - size.width / 2
+        left = Math.max(margin, Math.min(left, window.innerWidth - size.width - margin))
+        let top = rect.top - size.height - 8
+        if (top < margin) top = rect.bottom + 8
+        setPosition({ position: 'fixed', left: `${left}px`, top: `${top}px` })
+      }, [])
+
+      const panelNodeRef = React.useCallback(
+        (node) => {
+          panelRef.current = node
+          if (node !== null) placePanel()
+        },
+        [placePanel],
+      )
+
+      React.useEffect(() => {
+        if (!open) return undefined
+        placePanel()
+        window.addEventListener('resize', placePanel)
+        window.addEventListener('scroll', placePanel, true)
+        return () => {
+          window.removeEventListener('resize', placePanel)
+          window.removeEventListener('scroll', placePanel, true)
+        }
+      }, [open, view, placePanel])
+
+      // Close on Escape or an outside pointer press.
+      React.useEffect(() => {
+        if (!open) return undefined
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') setOpen(false)
+        }
+        const onPointerDown = (event) => {
+          const target = event.target
+          if (!(target instanceof Node)) return
+          if (rootRef.current?.contains(target) === true) return
+          if (panelRef.current?.contains(target) === true) return
+          setOpen(false)
+        }
+        document.addEventListener('keydown', onKeyDown)
+        document.addEventListener('pointerdown', onPointerDown, true)
+        return () => {
+          document.removeEventListener('keydown', onKeyDown)
+          document.removeEventListener('pointerdown', onPointerDown, true)
+        }
+      }, [open])
+
+      // A pay-as-you-go account has no plan quota, so the entry stays out of
+      // the dock entirely rather than showing an empty reading.
+      if (!active) return null
+      if (view !== null && view.ok !== true && view.reason === 'no-plan') return null
+
+      let label
+      if (view === null) {
+        label = t('loading')
+      } else if (view.ok !== true) {
+        label =
+          view.reason === 'missing-credential'
+            ? t('missingCredential')
+            : t('requestFailed', { message: view.message ?? '' })
+      } else {
+        const parts = []
+        if (view.intervalRemainingPercent !== null) {
+          parts.push(
+            h(
+              'span',
+              { className: '__mmq_group', key: 'interval' },
+              h('span', { className: `__mmq_dot${severityClass(view.intervalRemainingPercent)}` }),
+              h('span', null, `${t('intervalLabel')} ${view.intervalRemainingPercent}%`),
+            ),
+          )
+        }
+        if (view.weeklyRemainingPercent !== null) {
+          parts.push(
+            h(
+              'span',
+              { className: '__mmq_group', key: 'weekly' },
+              h('span', { className: `__mmq_dot${severityClass(view.weeklyRemainingPercent)}` }),
+              h('span', null, `${t('weeklyLabel')} ${view.weeklyRemainingPercent}%`),
+            ),
+          )
+        }
+        label =
+          parts.length === 0
+            ? t('noWeeklyLimit')
+            : parts.flatMap((part, index) =>
+                index === 0
+                  ? [part]
+                  : [
+                      h(
+                        'span',
+                        { className: '__mmq_sep', key: `sep-${index}`, 'aria-hidden': true },
+                        '·',
+                      ),
+                      part,
+                    ],
+              )
+      }
+
+      // The panel opens on the status route's answer, not on the quota's:
+      // the models section and its sync button are independent of the quota,
+      // so a quota that could not be read must not lock them away.
+      const showPanel = open && payload !== null
+
+      // A screen reader gets the same two numbers the pill shows.
+      const ariaLabel =
+        view !== null && view.ok === true
+          ? [
+              view.intervalRemainingPercent !== null
+                ? t('remaining', { percent: view.intervalRemainingPercent })
+                : null,
+              view.weeklyRemainingPercent !== null
+                ? t('remaining', { percent: view.weeklyRemainingPercent })
+                : null,
+            ]
+              .filter((part) => part !== null)
+              .join(' · ')
+          : undefined
+
+      return h(
+        'span',
+        { ref: rootRef, className: '__mmq_anchor', 'data-composer-stat': 'minimax-quota' },
+        h(
+          'span',
+          { className: '__mmq_pillWrap' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: '__mmq_pill',
+              'aria-haspopup': 'dialog',
+              'aria-expanded': showPanel,
+              'aria-label': ariaLabel,
+              onClick: () => {
+                const opening = !open
+                setOpen(opening)
+                // Opening is the moment the user wants the freshest reading,
+                // so the status route is read once. The read is not cached:
+                // the quota has to reach MiniMax every time. Closing the
+                // panel needs no reading, because it is about to disappear.
+                if (opening) {
+                  readStatus().then((result) => {
+                    setPayload(result)
+                  })
+                }
+              },
+            },
+            h(QuotaIcon, null),
+            h('span', { className: '__mmq_label' }, label),
+          ),
+          // The badge is the number of models the user has not been told
+          // about, and it carries the locale string as its name, so a screen
+          // reader says what the number means.
+          unseen.length > 0
+            ? h(
+                'span',
+                {
+                  className: '__mmq_badge',
+                  'aria-label': t('modelsAdded', { count: unseen.length }),
+                },
+                unseen.length,
+              )
+            : null,
+        ),
+        showPanel
+          ? ReactDOM.createPortal(
+              h(QuotaPanel, {
+                view,
+                models,
+                t,
+                style: position ?? { position: 'fixed', left: '-9999px', top: '-9999px' },
+                panelRef: panelNodeRef,
+                onSync: syncNow,
+                syncing,
+                syncError,
+              }),
+              document.body,
+            )
+          : null,
+      )
+    }
+
+    // ── plugin ─────────────────────────────────────────────────────────────
+    const inject = ['slots', 'locale']
+
+    function apply(ctx) {
+      const t = ctx.locale.bind(NS)
+      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'minimax-quota: dictionaries')
+      ctx.effect(() => installStyles(), 'minimax-quota: styles')
+      ctx.slots.inject('conversation.composer.dock', () =>
+        ctx.slots.register(
+          {
+            name: 'conversation.composer.dock',
+            id: 'minimax-quota',
+            order: 2,
+            locale: NS,
+          },
+          MiniMaxQuotaPill,
+        ),
+      )
+    }
+
+    return { inject, apply }
+  },
+})
+```
+
+- [ ] **Step 10: Run the checks**
 
 Run: `npm test`
 Expected: PASS — the suite plus both syntax checks.
 
-- [ ] **Step 10: Verify the locale JSON parses**
+- [ ] **Step 11: Verify the locale JSON parses**
 
 Run: `node -e "for (const f of ['locale/zh.json','locale/en.json']) { JSON.parse(require('fs').readFileSync(f,'utf8')); console.log('ok', f) }"`
 Expected: `ok locale/zh.json` and `ok locale/en.json`.
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 12: Commit**
 
 ```bash
 git add client.js locale/zh.json locale/en.json test/client.test.js
