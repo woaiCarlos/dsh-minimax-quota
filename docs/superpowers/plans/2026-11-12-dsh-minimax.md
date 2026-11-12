@@ -1769,7 +1769,16 @@ export async function apply(ctx, config) {
         req.once('close', () => {
           if (!res.writableEnded) abort.abort()
         })
-        send(res, await buildStatusPayload(ctx, { credentialRef, signal: abort.signal }))
+        try {
+          send(res, await buildStatusPayload(ctx, { credentialRef, signal: abort.signal }))
+        } catch (error) {
+          // The route answers every sixty seconds; an unwritten response would
+          // leave the browser's request pending forever and stop its polling.
+          send(res, {
+            quota: { ok: false, reason: 'request-failed', message: error instanceof Error ? error.message : String(error) },
+            models: { synced: [], added: [], syncedAt: null },
+          })
+        }
       },
     }),
     webServer.register({
@@ -2134,6 +2143,24 @@ In `.github/workflows/ci.yml`, the patch check asserts the old name. Replace it:
             console.log('ok cordis.patch.yml');
           "
 ```
+
+The workflow also has to run the test suite. It currently only syntax-checks the two
+halves, so a regression inside `lib/` would ship green. Replace the syntax-check step
+with the test script — the script already runs both syntax checks:
+
+```yaml
+      - name: Run the test suite
+        run: npm test
+```
+
+After the change the workflow must contain no step named "Check JavaScript syntax".
+Verify with:
+
+```bash
+grep -n "npm test\|Check JavaScript syntax" .github/workflows/ci.yml
+```
+
+Expected: one line naming `npm test`, no line naming `Check JavaScript syntax`.
 
 - [ ] **Step 7: Update the READMEs**
 
