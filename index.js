@@ -59,6 +59,15 @@ const FIRST_SYNC_DELAY_MS = 2000
 const FIRST_SYNC_ATTEMPTS = 5
 
 /**
+ * The reason a sync reports when it was called off.
+ *
+ * An abort is not a failure: the plugin was unloaded, so the sync stops
+ * where it is, writes nothing, and says nothing. The reason is what tells
+ * the caller that it was called off rather than that it went wrong.
+ */
+const ABORTED_REASON = 'aborted'
+
+/**
  * Read the profile's current MiniMax model list.
  *
  * @param settings - the settings service.
@@ -165,6 +174,11 @@ function reportFailure(ctx, message, error) {
  * @param result - the sync result.
  */
 function logSync(ctx, label, result) {
+  if (result?.reason === ABORTED_REASON) {
+    // An abort is not a failure. The plugin was unloaded, so the sync stops
+    // quietly and the operator is not told about a problem that is not one.
+    return
+  }
   if (result?.ok !== true) {
     ctx.logger?.warn?.('%s: %s', `dsh-minimax: ${label} failed`, result?.reason ?? 'unknown')
     return
@@ -205,11 +219,24 @@ export async function runSync(ctx, options = {}) {
  * exactly as it is, and a model the user removed by hand is not added
  * back, because the ids this plugin added are remembered.
  *
+ * A signal is what calls the sync off. Every upstream request carries it,
+ * so an abort stops the requests that are in flight, and the sync returns
+ * without writing anything: a plugin that was unloaded must not write the
+ * profile or its own bookkeeping afterwards.
+ *
  * @param ctx - Host context.
- * @param options - `{ credentialRef, profileDir, fetchImpl, stateReader, stateWriter, now }`.
+ * @param options - `{ credentialRef, profileDir, fetchImpl, stateReader, stateWriter, now, signal }`.
  * @returns the sync outcome.
  */
 async function runSyncOnce(ctx, options = {}) {
+  const signal = options.signal
+  /**
+   * Whether the caller called this sync off.
+   *
+   * @returns true when the sync was called off.
+   */
+  const calledOff = () => signal?.aborted === true
+  if (calledOff()) return { ok: false, reason: ABORTED_REASON }
   const credentialRef = options.credentialRef ?? DEFAULT_CREDENTIAL_REF
   const settings = ctx.get('settings')
   if (settings === undefined) return { ok: false, reason: 'missing-settings' }
@@ -217,6 +244,7 @@ async function runSyncOnce(ctx, options = {}) {
   if (descriptor === undefined) return { ok: false, reason: 'missing-namespace' }
   const apiKey = await resolveApiKey(ctx, credentialRef)
   if (apiKey === undefined) return { ok: false, reason: 'missing-credential' }
+  if (calledOff()) return { ok: false, reason: ABORTED_REASON }
 
   const profileDir = options.profileDir ?? ctx.get('profileContext')?.dir
   const readStateFn = options.stateReader ?? (profileDir === undefined
@@ -230,7 +258,8 @@ async function runSyncOnce(ctx, options = {}) {
   const addedModels = Array.isArray(state.addedModels) ? state.addedModels : []
   const retiredModels = Array.isArray(state.retiredModels) ? state.retiredModels : []
   const listed = currentModels(descriptor)
-  const ids = await fetchModelIds(apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
+  const ids = await fetchModelIds(apiKey, { signal, fetchImpl: options.fetchImpl })
+  if (calledOff()) return { ok: false, reason: ABORTED_REASON }
   if (ids === null) {
     // The list could not be read. That is not an empty account, and it must
     // not be mistaken for one.
@@ -247,7 +276,10 @@ async function runSyncOnce(ctx, options = {}) {
   const entries = new Map()
   const retiredIds = []
   for (const id of candidateIds) {
-    const probe = await probeModel(id, apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
+    const probe = await probeModel(id, apiKey, { signal, fetchImpl: options.fetchImpl })
+    // The sync was called off while the model was being probed, so the
+    // remaining models are not probed and nothing is written.
+    if (calledOff()) return { ok: false, reason: ABORTED_REASON }
     if (probe.status === 'retired') {
       retiredIds.push(id)
       continue
@@ -267,6 +299,9 @@ async function runSyncOnce(ctx, options = {}) {
   }
 
   if (plan.changed) {
+    // The write happens only while the sync is still wanted: a plugin that
+    // was unloaded must not change the profile of the user.
+    if (calledOff()) return { ok: false, reason: ABORTED_REASON }
     // The written map is the effective one, because the settings service
     // replaces the whole `providers` map: a route the user configured in an
     // inherited layer is only visible in the effective projection, and a map
@@ -287,6 +322,10 @@ async function runSyncOnce(ctx, options = {}) {
   }
 
   const now = options.now ?? Date.now
+  // The bookkeeping write is the last thing the sync does, and it happens
+  // only while the sync is still wanted: a state file written after the
+  // plugin was unloaded would land in a directory that is on its way out.
+  if (calledOff()) return { ok: false, reason: ABORTED_REASON }
   try {
     await writeStateFn(profileDir, {
       addedModels: [...addedModels, ...plan.addedIds],
@@ -425,7 +464,9 @@ export async function apply(ctx, config) {
  *
  * The wait is a timer, so the plugin has to be able to call it off: a
  * plugin that is unloaded while the attempt is pending must not write the
- * profile afterwards.
+ * profile afterwards. The attempt owns a signal as well, so a plugin that
+ * is unloaded while the sync is running stops it: the upstream requests
+ * are called off and nothing is written into the profile afterwards.
  *
  * @param ctx - Host context.
  * @param credentialRef - credential reference to resolve.
@@ -435,6 +476,7 @@ function scheduleSync(ctx, credentialRef) {
   let timer = null
   let wake = null
   let cancelled = false
+  const controller = new AbortController()
 
   const wait = (ms) => new Promise((resolve) => {
     wake = resolve
@@ -456,6 +498,9 @@ function scheduleSync(ctx, credentialRef) {
       wake = null
       resolve()
     }
+    // A sync that is already running stops here: the signal reaches the
+    // upstream requests and the sync writes nothing afterwards.
+    controller.abort()
   }
 
   const attempt = async () => {
@@ -463,10 +508,14 @@ function scheduleSync(ctx, credentialRef) {
       await wait(FIRST_SYNC_DELAY_MS)
       if (cancelled) return
       try {
-        const result = await runSync(ctx, { credentialRef })
+        const result = await runSync(ctx, { credentialRef, signal: controller.signal })
+        // An abort is not a failure and is not tried again: the plugin is
+        // gone, so the attempt stops here and says nothing.
+        if (controller.signal.aborted || result?.reason === ABORTED_REASON) return
         logSync(ctx, 'the startup sync', result)
         if (result.ok || result.reason === 'missing-credential') return
       } catch (error) {
+        if (controller.signal.aborted) return
         // A failed sync must never take the plugin down; the next attempt
         // tries again. The failure is not swallowed: it goes to the log.
         reportFailure(ctx, 'dsh-minimax: the startup sync failed', error)
@@ -489,6 +538,10 @@ function scheduleSync(ctx, credentialRef) {
  * A model MiniMax retired is probed once and then remembered, so it does not
  * cost two requests every day for an answer that never changes.
  *
+ * The sweep owns a signal, so a plugin that is unloaded while the sweep is
+ * running stops it: the upstream requests are called off and nothing is
+ * written into the profile afterwards.
+ *
  * @param ctx - Host context.
  * @param credentialRef - credential reference to resolve.
  * @returns a function that cancels the pending sweep.
@@ -497,6 +550,7 @@ function scheduleDailySync(ctx, credentialRef) {
   let timer = null
   let wake = null
   let cancelled = false
+  const controller = new AbortController()
 
   const wait = (ms) => new Promise((resolve) => {
     wake = resolve
@@ -519,6 +573,9 @@ function scheduleDailySync(ctx, credentialRef) {
       wake = null
       resolve()
     }
+    // A sweep that is already running stops here: the signal reaches the
+    // upstream requests and the sweep writes nothing afterwards.
+    controller.abort()
   }
 
   const sweep = async () => {
@@ -526,9 +583,13 @@ function scheduleDailySync(ctx, credentialRef) {
       await wait(SYNC_INTERVAL_MS)
       if (cancelled) return
       try {
-        const result = await runSync(ctx, { credentialRef })
+        const result = await runSync(ctx, { credentialRef, signal: controller.signal })
+        // An abort is not a failure: the plugin is gone, so the sweep stops
+        // here and says nothing.
+        if (controller.signal.aborted || result?.reason === ABORTED_REASON) return
         logSync(ctx, 'the daily sync', result)
       } catch (error) {
+        if (controller.signal.aborted) return
         reportFailure(ctx, 'the daily sync failed', error)
       }
     }

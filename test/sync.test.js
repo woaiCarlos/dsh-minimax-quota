@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -286,6 +287,18 @@ const fakeFetch = async (url, init) => {
 /** A day, in milliseconds: the delay the daily sweep waits for. */
 const DAY_MS = 24 * 60 * 60 * 1000
 
+/** How long the wait for pending work may take, in milliseconds. */
+const WAIT_UNTIL_TIMEOUT_MS = 5000
+
+/**
+ * How many event-loop turns the wait may take before it gives up anyway.
+ *
+ * The deadline is the real limit. This is the backstop that keeps a test
+ * from spinning forever when the wall clock does not move, which is what a
+ * test that mocks `Date` would do.
+ */
+const WAIT_UNTIL_MAX_ROUNDS = 2000000
+
 /**
  * Watch the timers the plugin arms.
  *
@@ -336,17 +349,93 @@ async function flush(rounds = 30) {
 /**
  * Let the pending work run until the condition holds.
  *
- * A timer that comes due starts work that awaits promises and reads files,
- * so it needs real turns of the event loop before it is finished.
+ * The wait is on real time, not on a number of event-loop turns: a turn
+ * costs microseconds, so a fixed number of turns is a few milliseconds, and
+ * a sync that probes every model MiniMax offers takes longer than that on a
+ * loaded machine. A wait that gives up after a few milliseconds lets the
+ * test tear the plugin down while the sync is still running, and the sync
+ * then writes into a directory that is on its way out.
+ *
+ * The deadline is compared against the wall clock, which keeps running even
+ * when a test mocks the timers, and the polling uses `setImmediate`, which
+ * such a test leaves alone.
  *
  * @param check - returns true once the work is done.
  */
 async function waitUntil(check) {
-  for (let round = 0; round < 500; round += 1) {
+  const deadline = Date.now() + WAIT_UNTIL_TIMEOUT_MS
+  for (let round = 0; round < WAIT_UNTIL_MAX_ROUNDS; round += 1) {
     if (check()) return
+    if (Date.now() >= deadline) break
     await new Promise((resolve) => setImmediate(resolve))
   }
   assert.fail('the pending work did not finish in time')
+}
+
+/**
+ * Give the pending work the time it may need.
+ *
+ * The wait is on the wall clock, so it keeps running even when a test mocks
+ * the timers. It is used to let work that must *not* happen have every
+ * chance to happen, so its absence can be asserted.
+ *
+ * @param ms - how long to wait.
+ */
+async function settle(ms) {
+  const deadline = Date.now() + ms
+  for (let round = 0; round < WAIT_UNTIL_MAX_ROUNDS; round += 1) {
+    if (Date.now() >= deadline) return
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+}
+
+/**
+ * A promise the test settles from the outside.
+ *
+ * @returns the promise and the function that settles it.
+ */
+function deferred() {
+  let release
+  const promise = new Promise((resolve) => { release = resolve })
+  return { promise, release }
+}
+
+/**
+ * A request that waits until the test releases it or the signal aborts.
+ *
+ * A real request behaves exactly like this: it ends when the answer
+ * arrives, and it fails when the caller calls it off.
+ *
+ * @param signal - the request's signal.
+ * @param gate - the deferred the test releases.
+ * @returns a promise that settles when one of the two happens.
+ */
+function waitForRelease(signal, gate) {
+  return new Promise((resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(new Error('the request was aborted')))
+    gate.promise.then(resolve, reject)
+  })
+}
+
+/**
+ * A fetch that answers the model list and hangs on the probe.
+ *
+ * The probe is where the sync spends its time, so a test that disposes the
+ * plugin while a probe is in flight can see whether the sync stops.
+ *
+ * @param options - `{ gate, requests }`; the requests are recorded by name.
+ * @returns the fetch implementation.
+ */
+function hangingProbeFetch({ gate, requests }) {
+  return async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      requests.push('models')
+      return new Response(JSON.stringify({ data: MODEL_IDS.map((id) => ({ id })) }), { status: 200 })
+    }
+    requests.push('probe')
+    await waitForRelease(init?.signal, gate)
+    return PROBE_FETCH(url, init)
+  }
 }
 
 test('runSync appends a newly released model and leaves the rest alone', async () => {
@@ -953,6 +1042,139 @@ test('the daily sweep is cancelled when the plugin is disposed', async (t) => {
   } finally {
     globalThis.fetch = originalFetch
     watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('a disposed plugin stops the sync that is in flight', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-inflight-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  const gate = deferred()
+  const requests = []
+  globalThis.fetch = hangingProbeFetch({ gate, requests })
+  try {
+    await apply(ctx, {})
+    // The first attempt comes due and the sync starts.
+    t.mock.timers.tick(2000)
+    await waitUntil(() => requests.includes('probe'))
+
+    // The plugin is unloaded while the probe is in flight.
+    disposeAll(ctx)
+    // The probe is released anyway: a sync that was not stopped would carry
+    // on here, probe the next model, and write into the profile.
+    gate.release()
+    await settle(300)
+
+    // The sync stopped: the second model was never probed.
+    assert.deepEqual(requests, ['models', 'probe'])
+    // The profile was not written.
+    assert.equal(settings.writes.length, 0)
+    // And no bookkeeping landed in the profile directory.
+    assert.equal(existsSync(join(profileDir, STATE_FILENAME)), false)
+    // An abort is not a failure, so nothing was reported to the operator.
+    assert.equal(ctx.logs.length, 0)
+    assert.equal(ctx.warns.length, 0)
+    assert.equal(ctx.infos.length, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+    gate.release()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the daily sweep stops when the plugin is disposed while it is running', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-sweep-inflight-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  const gate = deferred()
+  const requests = []
+  globalThis.fetch = hangingProbeFetch({ gate, requests })
+  try {
+    await apply(ctx, {})
+    // The startup attempt is called off, so the only sync that can run is
+    // the daily sweep.
+    disposeEffect(ctx, 'dsh-minimax: first sync')
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => requests.includes('probe'))
+
+    // The plugin is unloaded while the sweep is in flight.
+    disposeAll(ctx)
+    // The probe is released anyway: a sweep that was not stopped would carry
+    // on here, probe the next model, and write into the profile.
+    gate.release()
+    await settle(300)
+
+    // The sweep stopped: the second model was never probed.
+    assert.deepEqual(requests, ['models', 'probe'])
+    // The profile was not written.
+    assert.equal(settings.writes.length, 0)
+    // And no bookkeeping landed in the profile directory.
+    assert.equal(existsSync(join(profileDir, STATE_FILENAME)), false)
+    // An abort is not a failure, so nothing was reported to the operator.
+    assert.equal(ctx.logs.length, 0)
+    assert.equal(ctx.warns.length, 0)
+    assert.equal(ctx.infos.length, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+    gate.release()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('a teardown during a sync leaves no file behind', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-teardown-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  const gate = deferred()
+  const requests = []
+  globalThis.fetch = hangingProbeFetch({ gate, requests })
+  try {
+    await apply(ctx, {})
+    t.mock.timers.tick(2000)
+    await waitUntil(() => requests.includes('probe'))
+
+    // The profile directory goes away while the sync is still running. This
+    // is the teardown the CI run hit: the directory was removed while the
+    // sync was still going, and the sync then wrote into it.
+    await rm(profileDir, { recursive: true, force: true })
+    assert.equal(existsSync(profileDir), false)
+
+    // The plugin is unloaded, which stops the sync that was still running.
+    disposeAll(ctx)
+    gate.release()
+    await settle(300)
+
+    // Nothing was written into the directory afterwards: it was not
+    // recreated, and no bookkeeping landed in it.
+    assert.equal(existsSync(profileDir), false)
+    assert.equal(settings.writes.length, 0)
+    // The sync stopped rather than carrying on.
+    assert.deepEqual(requests, ['models', 'probe'])
+  } finally {
+    globalThis.fetch = originalFetch
+    gate.release()
     disposeAll(ctx)
     await rm(profileDir, { recursive: true, force: true })
     t.mock.timers.reset()
