@@ -42,6 +42,7 @@ window.__ModuleLoader__.load({
       modelsSyncedAt: '模型列表更新于 {when}',
       modelsSync: '立即同步',
       modelsSyncing: '同步中…',
+      modelsSyncFailed: '同步失败：{reason}',
       daily: '{days} 天 {hours} 小时',
       hours: '{hours} 小时 {minutes} 分钟',
       minutes: '{minutes} 分钟',
@@ -71,6 +72,7 @@ window.__ModuleLoader__.load({
       modelsSyncedAt: 'Model list updated at {when}',
       modelsSync: 'Sync now',
       modelsSyncing: 'Syncing…',
+      modelsSyncFailed: 'Sync failed: {reason}',
       daily: '{days}d {hours}h',
       hours: '{hours}h {minutes}m',
       minutes: '{minutes}m',
@@ -84,7 +86,7 @@ window.__ModuleLoader__.load({
       '.__mmq_pill:hover,.__mmq_pill:focus-visible,.__mmq_pill[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}',
       '.__mmq_pill svg{flex:none;width:14px;height:14px}',
       '.__mmq_label{text-overflow:ellipsis;min-width:0;overflow:hidden}',
-      '.__mmq_sep{color:var(--dsw-alias-separator-primary);margin:0 6px}',
+      '.__mmq_sep{color:var(--dsw-alias-border-l2);margin:0 6px}',
       '.__mmq_group{display:inline-flex;align-items:center;gap:4px}',
       '.__mmq_dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-state-success-primary)}',
       '.__mmq_dotLow{background:var(--dsw-alias-state-warn-primary)}',
@@ -105,11 +107,11 @@ window.__ModuleLoader__.load({
       '.__mmq_barFillLow{background:var(--dsw-alias-state-warn-primary)}',
       '.__mmq_barFillCritical{background:var(--dsw-alias-state-error-primary)}',
       '.__mmq_hint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
-      '.__mmq_error{color:var(--dsw-alias-label-error)}',
+      '.__mmq_error{color:var(--dsw-alias-state-error-primary)}',
       '.__mmq_models{margin-top:12px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1)}',
       '.__mmq_sectionTitle{font-weight:600;color:var(--dsw-alias-label-primary);margin-bottom:6px}',
       '.__mmq_modelList{display:flex;flex-wrap:wrap;gap:4px}',
-      '.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-fill-l2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
+      '.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
       '.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warn-label);font-size:11px}',
       '.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
       '.__mmq_syncButton{margin-top:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);padding:2px 8px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;cursor:pointer;pointer-events:auto}',
@@ -219,6 +221,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The line the panel shows when a manual sync did not work.
+     *
+     * The Host answers with a fixed reason and never with an internal
+     * message, so the reason is all the browser can show.
+     *
+     * @param reason - why the sync failed.
+     * @param t - the locale function.
+     * @returns the line to show.
+     */
+    function syncFailureText(reason, t) {
+      if (reason === 'missing-credential') return t('missingCredential')
+      return t('modelsSyncFailed', { reason })
+    }
+
+    /**
      * Read the status route: the quota view and the model summary.
      *
      * @returns a promise for `{ quota, models }`.
@@ -278,10 +295,12 @@ window.__ModuleLoader__.load({
      * The anchored panel: one card per quota window, each with a bar and
      * the moment its window resets.
      */
-    function QuotaPanel({ view, models, t, style, panelRef, onSync, syncing }) {
+    function QuotaPanel({ view, models, t, style, panelRef, onSync, syncing, syncError }) {
       const rows = []
-      const interval = view.intervalRemainingPercent
-      const weekly = view.weeklyRemainingPercent
+      // A quota that could not be read carries no percentages at all, so its
+      // windows are absent rather than zero.
+      const interval = view.ok === true ? view.intervalRemainingPercent : null
+      const weekly = view.ok === true ? view.weeklyRemainingPercent : null
       if (interval !== null) {
         rows.push(
           h(
@@ -348,7 +367,13 @@ window.__ModuleLoader__.load({
           ),
         )
       }
-      if (rows.length === 0) {
+      if (view.ok !== true) {
+        // The quota could not be read, so the panel says why instead of
+        // claiming the plan has no limit.
+        rows.push(h('div', { className: '__mmq_error' }, view.reason === 'missing-credential'
+          ? t('missingCredential')
+          : t('requestFailed', { message: view.message ?? '' })))
+      } else if (rows.length === 0) {
         rows.push(h('div', { className: '__mmq_hint' }, t('noWeeklyLimit')))
       }
       return h(
@@ -373,7 +398,7 @@ window.__ModuleLoader__.load({
         h('div', { className: '__mmq_titleRule', 'aria-hidden': true }),
         h('p', { className: '__mmq_subtitle' }, t('panelSubtitle')),
         h('div', { className: '__mmq_rows' }, rows),
-        h(ModelsPanel, { models, t, onSync, syncing }),
+        h(ModelsPanel, { models, t, onSync, syncing, syncError }),
         h(
           'div',
           { className: '__mmq_hint', style: { marginTop: '10px' } },
@@ -394,7 +419,7 @@ window.__ModuleLoader__.load({
      * The section shows even when no model has been synced yet, so the sync
      * button is reachable in exactly the state where it is most useful.
      */
-    function ModelsPanel({ models, t, onSync, syncing }) {
+    function ModelsPanel({ models, t, onSync, syncing, syncError }) {
       if (models === undefined) return null
       const synced = Array.isArray(models.synced) ? models.synced : []
       const added = Array.isArray(models.added) ? models.added : []
@@ -409,6 +434,7 @@ window.__ModuleLoader__.load({
           ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
           : null,
         models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
+        syncError ? h('div', { className: '__mmq_error' }, syncError) : null,
         onSync
           ? h('button', {
               className: '__mmq_syncButton',
@@ -433,6 +459,7 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false)
       const [noticeSeen, setNoticeSeen] = React.useState(false)
       const [syncing, setSyncing] = React.useState(false)
+      const [syncError, setSyncError] = React.useState(null)
       const [position, setPosition] = React.useState(null)
       const rootRef = React.useRef(null)
       const panelRef = React.useRef(null)
@@ -443,18 +470,29 @@ window.__ModuleLoader__.load({
       const models = payload?.models
 
       // The sync probes the candidates MiniMax offers, which can take a
-      // while, so the button asks and waits for the answer.
+      // while, so the button asks and waits for the answer. The Host answers
+      // HTTP 200 with `{"ok":false}` when the sync failed, so the payload is
+      // what says whether the sync worked.
       const syncNow = async () => {
         if (syncing) return
         setSyncing(true)
+        setSyncError(null)
         try {
           const response = await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
-          if (!response.ok) return
-        } catch {
-          // A failed request leaves the panel as it was. The status poll reports
-          // the model list, not the outcome of the sync.
+          const body = await response.json().catch(() => null)
+          if (!response.ok || body?.ok !== true) {
+            setSyncError(syncFailureText(body?.reason ?? `HTTP ${response.status}`, t))
+          }
+        } catch (error) {
+          // A failed request leaves the model list as it was, but the user
+          // has to see that the sync did not happen.
+          setSyncError(syncFailureText(error instanceof Error ? error.message : String(error), t))
         } finally {
           setSyncing(false)
+          // The status route is the only thing that reports the model list,
+          // so the panel is refreshed right away instead of waiting for the
+          // next poll.
+          readStatus().then((result) => setPayload(result))
         }
       }
 
@@ -596,7 +634,10 @@ window.__ModuleLoader__.load({
               )
       }
 
-      const showPanel = open && view !== null && view.ok === true
+      // The panel opens on the status route's answer, not on the quota's:
+      // the models section and its sync button are independent of the quota,
+      // so a quota that could not be read must not lock them away.
+      const showPanel = open && payload !== null
 
       // The badge tells the user that the plugin added models, until they
       // have opened the panel and read the list themselves.
@@ -654,6 +695,7 @@ window.__ModuleLoader__.load({
                 panelRef: panelNodeRef,
                 onSync: syncNow,
                 syncing,
+                syncError,
               }),
               document.body,
             )

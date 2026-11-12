@@ -27,6 +27,7 @@
     "modelsSyncedAt": "模型列表更新于 {when}",
     "modelsSync": "立即同步",
     "modelsSyncing": "同步中…",
+    "modelsSyncFailed": "同步失败：{reason}",
     "daily": "{days} 天 {hours} 小时",
     "hours": "{hours} 小时 {minutes} 分钟",
     "minutes": "{minutes} 分钟",
