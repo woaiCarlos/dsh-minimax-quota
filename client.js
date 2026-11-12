@@ -36,6 +36,9 @@ window.__ModuleLoader__.load({
       panelResetIn: '距离重置还有 {duration}',
       panelFetchedAt: '更新于 {when}',
       panelModel: '模型分组：{name}',
+      modelsTitle: '已同步的模型',
+      modelsAdded: '已自动补充 {count} 个新模型',
+      modelsSyncedAt: '模型列表更新于 {when}',
       daily: '{days} 天 {hours} 小时',
       hours: '{hours} 小时 {minutes} 分钟',
       minutes: '{minutes} 分钟',
@@ -60,6 +63,9 @@ window.__ModuleLoader__.load({
       panelResetIn: 'Resets in {duration}',
       panelFetchedAt: 'Updated {when}',
       panelModel: 'Model bucket: {name}',
+      modelsTitle: 'Synced models',
+      modelsAdded: '{count} new model(s) added automatically',
+      modelsSyncedAt: 'Model list updated at {when}',
       daily: '{days}d {hours}h',
       hours: '{hours}h {minutes}m',
       minutes: '{minutes}m',
@@ -74,7 +80,7 @@ window.__ModuleLoader__.load({
       '.__mmq_pill svg{flex:none;width:14px;height:14px}',
       '.__mmq_label{text-overflow:ellipsis;min-width:0;overflow:hidden}',
       '.__mmq_sep{color:var(--dsw-alias-separator-primary);margin:0 6px}',
-      '.__mmq_badge{display:inline-flex;align-items:center;gap:4px}',
+      '.__mmq_group{display:inline-flex;align-items:center;gap:4px}',
       '.__mmq_dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-state-success-primary)}',
       '.__mmq_dotLow{background:var(--dsw-alias-state-warn-primary)}',
       '.__mmq_dotCritical{background:var(--dsw-alias-state-error-primary)}',
@@ -95,6 +101,14 @@ window.__ModuleLoader__.load({
       '.__mmq_barFillCritical{background:var(--dsw-alias-state-error-primary)}',
       '.__mmq_hint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
       '.__mmq_error{color:var(--dsw-alias-label-error)}',
+      '.__mmq_models{margin-top:12px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1)}',
+      '.__mmq_sectionTitle{font-weight:600;color:var(--dsw-alias-label-primary);margin-bottom:6px}',
+      '.__mmq_modelList{display:flex;flex-wrap:wrap;gap:4px}',
+      '.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-fill-l2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
+      '.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warn-label);font-size:11px}',
+      '.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
+      '.__mmq_badge{position:absolute;top:-2px;right:-2px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}',
+      '.__mmq_pillWrap{position:relative;display:inline-flex}',
     ].join('')
 
     function installStyles() {
@@ -109,7 +123,8 @@ window.__ModuleLoader__.load({
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
-    const QUOTA_ROUTE = '/plugin/minimax-quota'
+    /** The route that answers the quota view and the model summary. */
+    const STATUS_ROUTE = '/plugin/minimax/status'
 
     /** Providers whose routes serve the MiniMax model family. */
     function isMiniMaxProvider(provider) {
@@ -170,9 +185,9 @@ window.__ModuleLoader__.load({
       return ''
     }
 
-    // ── quota fetching ─────────────────────────────────────────────────────
+    // ── status fetching ────────────────────────────────────────────────────
     /**
-     * One in-flight quota read shared by every subscriber of this page, so a
+     * One in-flight status read shared by every subscriber of this page, so a
      * remount does not multiply upstream calls.
      */
     let pending = null
@@ -180,17 +195,39 @@ window.__ModuleLoader__.load({
     /** How often the reading refreshes while a MiniMax model is selected. */
     const REFRESH_INTERVAL_MS = 60_000
 
-    function readQuota() {
+    /**
+     * The quota view of a status payload.
+     *
+     * A payload without a quota is malformed, so it reads as the failure the
+     * browser already knows how to show.
+     *
+     * @param payload - the status payload.
+     * @returns the quota view.
+     */
+    function quotaView(payload) {
+      return payload?.quota ?? { ok: false, reason: 'request-failed', message: 'Malformed response.' }
+    }
+
+    /**
+     * Read the status route: the quota view and the model summary.
+     *
+     * @returns a promise for `{ quota, models }`.
+     */
+    function readStatus() {
       if (pending !== null) return pending
-      pending = fetch(QUOTA_ROUTE, { headers: { accept: 'application/json' } })
+      pending = fetch(STATUS_ROUTE, { headers: { accept: 'application/json' } })
         .then(async (response) => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`)
-          return await response.json()
+          const payload = await response.json()
+          return { quota: quotaView(payload), models: payload?.models }
         })
         .catch((error) => ({
-          ok: false,
-          reason: 'request-failed',
-          message: error instanceof Error ? error.message : String(error),
+          quota: {
+            ok: false,
+            reason: 'request-failed',
+            message: error instanceof Error ? error.message : String(error),
+          },
+          models: undefined,
         }))
         .finally(() => {
           pending = null
@@ -231,7 +268,7 @@ window.__ModuleLoader__.load({
      * The anchored panel: one card per quota window, each with a bar and
      * the moment its window resets.
      */
-    function QuotaPanel({ view, t, style, panelRef }) {
+    function QuotaPanel({ view, models, t, style, panelRef }) {
       const rows = []
       const interval = view.intervalRemainingPercent
       const weekly = view.weeklyRemainingPercent
@@ -326,11 +363,36 @@ window.__ModuleLoader__.load({
         h('div', { className: '__mmq_titleRule', 'aria-hidden': true }),
         h('p', { className: '__mmq_subtitle' }, t('panelSubtitle')),
         h('div', { className: '__mmq_rows' }, rows),
+        h(ModelsPanel, { models, t }),
         h(
           'div',
           { className: '__mmq_hint', style: { marginTop: '10px' } },
           t('panelFetchedAt', { when: formatClock(view.fetchedAt) }),
         ),
+      )
+    }
+
+    /**
+     * The models section: the ids the profile currently holds, how many of
+     * them the plugin added, and the moment the list was last written.
+     *
+     * The section only reads. The plugin appends and never edits, so the
+     * models it added are the user's to keep or to remove by hand.
+     */
+    function ModelsPanel({ models, t }) {
+      if (models === undefined) return null
+      const synced = Array.isArray(models.synced) ? models.synced : []
+      const added = Array.isArray(models.added) ? models.added : []
+      if (synced.length === 0) return null
+      return h('div', { className: '__mmq_models' },
+        h('div', { className: '__mmq_sectionTitle' }, t('modelsTitle')),
+        h('div', { className: '__mmq_modelList' },
+          synced.map((id) => h('span', { className: '__mmq_modelChip', key: id }, id)),
+        ),
+        added.length > 0
+          ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
+          : null,
+        models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
       )
     }
 
@@ -343,23 +405,29 @@ window.__ModuleLoader__.load({
       const selection = useProjection('modelSelection')
       const current = selection?.next ?? selection?.lastUsed ?? null
       const active = selectionIsMiniMax(current)
-      const [view, setView] = React.useState(null)
+      const [payload, setPayload] = React.useState(null)
       const [open, setOpen] = React.useState(false)
+      const [noticeSeen, setNoticeSeen] = React.useState(false)
       const [position, setPosition] = React.useState(null)
       const rootRef = React.useRef(null)
       const panelRef = React.useRef(null)
+
+      // The status route answers both halves: the quota the pill shows and
+      // the model summary the panel lists.
+      const view = payload?.quota ?? null
+      const models = payload?.models
 
       // Read the quota whenever a MiniMax model is the active selection, and
       // refresh it on a slow cadence so the reading stays current.
       React.useEffect(() => {
         if (!active) {
-          setView(null)
+          setPayload(null)
           return undefined
         }
         let alive = true
         const refresh = () => {
-          readQuota().then((result) => {
-            if (alive) setView(result)
+          readStatus().then((result) => {
+            if (alive) setPayload(result)
           })
         }
         refresh()
@@ -369,6 +437,14 @@ window.__ModuleLoader__.load({
           window.clearInterval(timer)
         }
       }, [active, current?.provider, current?.model])
+
+      // The badge marks "there are models you did not add by hand". The
+      // plugin's list of added models is cumulative, so the badge is a hint
+      // rather than a queue: it clears once the user has opened the panel,
+      // which lists the whole set either way.
+      React.useEffect(() => {
+        if (open) setNoticeSeen(true)
+      }, [open])
 
       // Place the panel above the trigger, inside the viewport. The panel is
       // portaled into the document body, so its node attaches after this
@@ -446,7 +522,7 @@ window.__ModuleLoader__.load({
           parts.push(
             h(
               'span',
-              { className: '__mmq_badge', key: 'interval' },
+              { className: '__mmq_group', key: 'interval' },
               h('span', { className: `__mmq_dot${severityClass(view.intervalRemainingPercent)}` }),
               h('span', null, `${t('intervalLabel')} ${view.intervalRemainingPercent}%`),
             ),
@@ -456,7 +532,7 @@ window.__ModuleLoader__.load({
           parts.push(
             h(
               'span',
-              { className: '__mmq_badge', key: 'weekly' },
+              { className: '__mmq_group', key: 'weekly' },
               h('span', { className: `__mmq_dot${severityClass(view.weeklyRemainingPercent)}` }),
               h('span', null, `${t('weeklyLabel')} ${view.weeklyRemainingPercent}%`),
             ),
@@ -481,6 +557,10 @@ window.__ModuleLoader__.load({
 
       const showPanel = open && view !== null && view.ok === true
 
+      // The badge tells the user that the plugin added models, until they
+      // have opened the panel and read the list themselves.
+      const hasNotice = !noticeSeen && (payload?.models?.added?.length ?? 0) > 0
+
       // A screen reader gets the same two numbers the pill shows.
       const ariaLabel =
         view !== null && view.ok === true
@@ -500,28 +580,34 @@ window.__ModuleLoader__.load({
         'span',
         { ref: rootRef, className: '__mmq_anchor', 'data-composer-stat': 'minimax-quota' },
         h(
-          'button',
-          {
-            type: 'button',
-            className: '__mmq_pill',
-            'aria-haspopup': 'dialog',
-            'aria-expanded': showPanel,
-            'aria-label': ariaLabel,
-            onClick: () => {
-              setOpen((previous) => !previous)
-              // Opening is the moment the user wants the freshest reading.
-              readQuota().then((result) => {
-                setView(result)
-              })
+          'span',
+          { className: '__mmq_pillWrap' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: '__mmq_pill',
+              'aria-haspopup': 'dialog',
+              'aria-expanded': showPanel,
+              'aria-label': ariaLabel,
+              onClick: () => {
+                setOpen((previous) => !previous)
+                // Opening is the moment the user wants the freshest reading.
+                readStatus().then((result) => {
+                  setPayload(result)
+                })
+              },
             },
-          },
-          h(QuotaIcon, null),
-          h('span', { className: '__mmq_label' }, label),
+            h(QuotaIcon, null),
+            h('span', { className: '__mmq_label' }, label),
+          ),
+          hasNotice ? h('span', { className: '__mmq_badge', 'aria-hidden': true }) : null,
         ),
         showPanel
           ? ReactDOM.createPortal(
               h(QuotaPanel, {
                 view,
+                models,
                 t,
                 style: position ?? { position: 'fixed', left: '-9999px', top: '-9999px' },
                 panelRef: panelNodeRef,
