@@ -1270,7 +1270,7 @@ test('a thinking model declares the effort levels and adaptive thinking', () => 
 test('a thinking model without adaptive efforts omits the compat block', () => {
   const entry = buildModelEntry('MiniMax-M3', { maxTokens: 524288, supportsThinking: true })
   assert.deepEqual(entry.reasoningEfforts, {
-    low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
+    low: 'low', medium: 'medium', high: 'high',
   })
   assert.equal('compat' in entry, false)
 })
