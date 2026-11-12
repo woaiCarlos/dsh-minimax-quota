@@ -417,7 +417,7 @@ zero runtime dependencies."
 - Consumes: nothing.
 - Produces:
   - `lib/specs.js` → `MODEL_SPECS: Record<string, object>`, `FALLBACK_SPEC: object`, `lookupSpec(modelId): object`, `SUPPORTED_MODALITIES: string[]`
-  - A spec object is `{ contextWindow: number, outputLimit: number, modalities: string[], reasoningOptions: { type: 'effort' | 'toggle' } | null }`
+  - A spec object is `{ contextWindow: number, outputLimit: number, modalities: string[], reasoningOptions: { type: 'effort' | 'toggle'; values?: string[] } | null }`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -469,6 +469,53 @@ test('an unknown model falls back to a conservative specification', () => {
   assert.deepEqual(spec.modalities, ['text'])
   assert.equal(spec.reasoningOptions, null)
 })
+
+test('the recorded output caps are the ones MiniMax reports', () => {
+  assert.equal(MODEL_SPECS['MiniMax-M3'].outputLimit, 524288)
+  assert.equal(MODEL_SPECS['MiniMax-M3.1-Flash'].outputLimit, 524288)
+  assert.equal(MODEL_SPECS['MiniMax-M2.7'].outputLimit, 131072)
+  assert.equal(FALLBACK_SPEC.outputLimit, 131072)
+})
+
+test('the recorded context windows are the ones MiniMax enforces', () => {
+  assert.equal(MODEL_SPECS['MiniMax-M3'].contextWindow, 1000000)
+  assert.equal(MODEL_SPECS['MiniMax-M3.1-Flash'].contextWindow, 1000000)
+  assert.equal(MODEL_SPECS['MiniMax-M2.7'].contextWindow, 204800)
+  assert.equal(MODEL_SPECS['MiniMax-M2.5-highspeed'].contextWindow, 204800)
+  assert.equal(FALLBACK_SPEC.contextWindow, 1000000)
+})
+
+test('every entry declares a known reasoning shape', () => {
+  for (const [id, spec] of Object.entries(MODEL_SPECS)) {
+    const options = spec.reasoningOptions
+    if (options === null) continue
+    assert.ok(['effort', 'toggle'].includes(options.type), `${id} reasoning type`)
+    if (options.type === 'effort') {
+      assert.ok(Array.isArray(options.values) && options.values.length > 0, `${id} effort values`)
+    } else {
+      assert.equal(options.values, undefined, `${id} toggle carries no values`)
+    }
+  }
+})
+
+test('the effort levels are the five spellings pi-ai accepts', () => {
+  assert.deepEqual(
+    MODEL_SPECS['MiniMax-M3.1-Flash'].reasoningOptions.values,
+    ['low', 'medium', 'high', 'xhigh', 'max'],
+  )
+})
+
+test('a name inherited from the prototype chain does not resolve to a prototype', () => {
+  assert.equal(lookupSpec('toString'), FALLBACK_SPEC)
+  assert.equal(lookupSpec('__proto__'), FALLBACK_SPEC)
+  assert.equal(lookupSpec('constructor'), FALLBACK_SPEC)
+})
+
+test('the snapshot is frozen all the way down', () => {
+  assert.throws(() => MODEL_SPECS['MiniMax-M3'].modalities.push('video'), TypeError)
+  assert.throws(() => { MODEL_SPECS['MiniMax-M3'].contextWindow = 1 }, TypeError)
+  assert.throws(() => FALLBACK_SPEC.modalities.push('video'), TypeError)
+})
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -497,8 +544,23 @@ Expected: FAIL with `Cannot find module '../lib/specs.js'`
 /** Modalities pi-ai accepts in a model entry. */
 export const SUPPORTED_MODALITIES = ['text', 'image']
 
+/**
+ * Freeze an object and everything inside it.
+ *
+ * A shallow freeze would leave the nested arrays mutable, and a mutated
+ * modality list is exactly what pi-ai rejects.
+ *
+ * @param value - the value to freeze.
+ * @returns the frozen value.
+ */
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value)) deepFreeze(child)
+  return Object.freeze(value)
+}
+
 /** One known model, keyed by the id MiniMax reports. */
-export const MODEL_SPECS = Object.freeze({
+export const MODEL_SPECS = deepFreeze({
   'MiniMax-M3.1-Flash': {
     contextWindow: 1000000,
     outputLimit: 524288,
@@ -556,7 +618,7 @@ export const MODEL_SPECS = Object.freeze({
 })
 
 /** Specification used for a model this snapshot has never seen. */
-export const FALLBACK_SPEC = Object.freeze({
+export const FALLBACK_SPEC = deepFreeze({
   contextWindow: 1000000,
   outputLimit: 131072,
   modalities: ['text'],
@@ -566,18 +628,22 @@ export const FALLBACK_SPEC = Object.freeze({
 /**
  * Look up the specification of one model id.
  *
+ * The lookup is an own-property check, not a plain read: a plain read finds
+ * `toString` and `__proto__` on the prototype chain, and the model ids come
+ * from an upstream API that this plugin does not control.
+ *
  * @param modelId - the id MiniMax reports.
  * @returns the known specification, or the conservative fallback.
  */
 export function lookupSpec(modelId) {
-  return MODEL_SPECS[modelId] ?? FALLBACK_SPEC
+  return Object.hasOwn(MODEL_SPECS, modelId) ? MODEL_SPECS[modelId] : FALLBACK_SPEC
 }
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/specs.test.js`
-Expected: PASS — 6 tests.
+Expected: PASS — 12 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -946,7 +1012,7 @@ nothing to think about."
 
 **Interfaces:**
 - Consumes: `lookupSpec(modelId)` from `lib/specs.js`.
-- Produces: `buildModelEntry(modelId, probe, spec?): object` — a pi-ai `modelProfile`.
+- Produces: `buildModelEntry(modelId, probe, spec?): object` — a pi-ai `modelProfile`; `FALLBACK_EFFORT_LEVELS: string[]`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -977,6 +1043,16 @@ test('a thinking model without adaptive efforts omits the compat block', () => {
     low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
   })
   assert.equal('compat' in entry, false)
+})
+
+test('a model that records its own effort levels uses those', () => {
+  const entry = buildModelEntry('MiniMax-M3.1-Flash', { maxTokens: 524288, supportsThinking: true }, {
+    contextWindow: 1000000,
+    outputLimit: 524288,
+    modalities: ['text', 'image'],
+    reasoningOptions: { type: 'effort', values: ['low', 'high'] },
+  })
+  assert.deepEqual(entry.reasoningEfforts, { low: 'low', high: 'high' })
 })
 
 test('a model that does not think turns reasoning off', () => {
@@ -1024,14 +1100,17 @@ Expected: FAIL with `Cannot find module '../lib/model-entry.js'`
 import { lookupSpec } from './specs.js'
 
 /**
- * The effort levels the plugin offers.
+ * The effort levels offered for a model the snapshot says nothing about.
  *
  * pi-ai maps a level onto a thinking budget when the model is called in
  * budget mode, and onto `output_config.effort` when the model is called in
  * adaptive mode. Either way a level needs a wire spelling, and the ones
  * below are the spellings MiniMax accepts.
+ *
+ * A model whose snapshot entry records its own levels uses those instead —
+ * they are the upstream's statement of what it accepts, and they win.
  */
-export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
+export const FALLBACK_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 /**
  * Build the pi-ai entry for one model.
@@ -1054,7 +1133,8 @@ export function buildModelEntry(modelId, probe, spec = lookupSpec(modelId)) {
     input: [...spec.modalities],
   }
   if (probe.supportsThinking === true) {
-    entry.reasoningEfforts = Object.fromEntries(EFFORT_LEVELS.map((level) => [level, level]))
+    const levels = spec.reasoningOptions?.values ?? FALLBACK_EFFORT_LEVELS
+    entry.reasoningEfforts = Object.fromEntries(levels.map((level) => [level, level]))
     if (spec.reasoningOptions?.type === 'effort') {
       entry.compat = { forceAdaptiveThinking: true }
     }
@@ -1068,7 +1148,7 @@ export function buildModelEntry(modelId, probe, spec = lookupSpec(modelId)) {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/model-entry.test.js`
-Expected: PASS — 7 tests.
+Expected: PASS — 8 tests.
 
 - [ ] **Step 5: Commit**
 
