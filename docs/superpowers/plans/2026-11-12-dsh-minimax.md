@@ -1676,7 +1676,7 @@ Create `test/state.test.js`:
 ```js
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { STATE_FILENAME, emptyState, readState, writeState } from '../lib/state.js'
@@ -1684,6 +1684,23 @@ import { STATE_FILENAME, emptyState, readState, writeState } from '../lib/state.
 async function scratchDir() {
   return await mkdtemp(join(tmpdir(), 'dsh-minimax-state-'))
 }
+
+test('a successful write leaves no temporary file behind', async () => {
+  const dir = await scratchDir()
+  await writeState(dir, { addedModels: ['MiniMax-M3'], lastSyncAt: 1 })
+  assert.deepEqual(await readdir(dir), [STATE_FILENAME])
+})
+
+test('a failed write leaves the previous state intact', async () => {
+  const dir = await scratchDir()
+  await writeState(dir, { addedModels: ['MiniMax-M3'], lastSyncAt: 1 })
+  // A directory where the temporary file goes makes the write fail.
+  await mkdir(join(dir, `${STATE_FILENAME}.tmp`))
+  await assert.rejects(() => writeState(dir, { addedModels: ['MiniMax-M3.2'], lastSyncAt: 2 }))
+  const state = await readState(dir)
+  assert.deepEqual(state.addedModels, ['MiniMax-M3'])
+  assert.equal(state.lastSyncAt, 1)
+})
 
 test('readState answers an empty state when the file is absent', async () => {
   const dir = await scratchDir()
@@ -1737,7 +1754,7 @@ Expected: FAIL with `Cannot find module '../lib/state.js'`
  * the user's profile patch.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /** Name of the state file inside the profile directory. */
@@ -1777,9 +1794,14 @@ export async function readState(dir) {
 /**
  * Write the plugin's state.
  *
+ * The write is atomic: the state reaches the file through a temporary file
+ * and a rename, so a crash cannot leave a half-written file that reads back
+ * as an empty state.
+ *
  * @param dir - the profile directory.
  * @param state - the state to store.
  * @returns the stored state.
+ * @throws when the state cannot be written; the caller decides what to do.
  */
 export async function writeState(dir, state) {
   await mkdir(dir, { recursive: true })
@@ -1787,7 +1809,21 @@ export async function writeState(dir, state) {
     addedModels: [...new Set(state.addedModels ?? [])].sort(),
     lastSyncAt: Number.isFinite(state.lastSyncAt) ? state.lastSyncAt : null,
   }
-  await writeFile(join(dir, STATE_FILENAME), `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+  const target = join(dir, STATE_FILENAME)
+  const temp = join(dir, `${STATE_FILENAME}.tmp`)
+  // The write goes through a temporary file and a rename, because a file
+  // truncated by a crash would read back as an empty state — and an empty
+  // state forgets which models the plugin added, so a model the user deleted
+  // by hand would come back.
+  try {
+    await writeFile(temp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+    await rename(temp, target)
+  } catch (error) {
+    // A failed write must not leave a partial file behind that a later read
+    // would mistake for state.
+    await rm(temp, { force: true }).catch(() => {})
+    throw error
+  }
   return payload
 }
 ```
@@ -1795,7 +1831,7 @@ export async function writeState(dir, state) {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/state.test.js`
-Expected: PASS — 5 tests.
+Expected: PASS — 7 tests.
 
 - [ ] **Step 5: Commit**
 
