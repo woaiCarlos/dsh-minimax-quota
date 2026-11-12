@@ -1,4 +1,4 @@
-# dsh-minimax —— MiniMax 额度显示与模型自动同步 插件设计
+# dsh-minimax —— MiniMax 额度显示与模型自动补充 插件设计
 
 日期：2026-11-12
 状态：待评审
@@ -45,24 +45,21 @@
               max: max
 ```
 
-这份手写配置有三个问题：
+手写配置的问题是：MiniMax 发布新模型时，必须手动查 id、手动补条目；
+条目里的数值是照抄 pi-ai 内置 catalog 的，而那份 catalog 与 MiniMax 官方并不一致（见 §2.4）。
 
-1. **模型列表会过期。** MiniMax 发布新模型时，用户必须手动去查 id、手动补条目。
-2. **条目不完整。** 用户手写的 `maxTokens: 512000` 与 pi-ai 官方 catalog 的 `524288` 不一致。
-3. **思考能力是猜的。** 用户只给 M3.1-Flash 配了思考档位，其他模型配没配、该不该配，靠人工判断。
-
-本设计把以上三件事全部交给插件。
+本设计把这些交给插件。
 
 ### 目标
 
 | 目标 | 验收标准 |
 | --- | --- |
 | 额度显示 | 保留现有功能：输入框下方显示 5 小时窗口与周窗口剩余百分比，点击展开详情 |
-| 模型自动发现 | MiniMax 发布新模型后，插件自动把它加进「设置 → 模型」 |
-| 模型自动下线 | MiniMax 下线模型后，插件自动把它从列表移除 |
-| 思考能力准确 | 每个模型的思考档位由**实测**决定，不靠猜 |
-| 无变化不动 | 没有模型变化时，不写 profile patch，不产生任何文件变动 |
-| 变更可见 | 新增与移除都有提醒 |
+| 新模型自动出现 | MiniMax 发布新模型后，插件自动把它补进「设置 → 模型」 |
+| 思考能力准确 | 每个新模型的思考档位按**实测 + 官方规格**决定，不靠猜 |
+| **不强制覆盖** | **绝不修改用户已有的模型条目，绝不删除任何条目** |
+| 无变化不动 | 没有新模型时，不写 profile patch，不产生任何文件变动 |
+| 变更可见 | 新增模型有提醒 |
 | 不泄露凭据 | 仓库与运行时都不出现 API Key 明文 |
 
 ---
@@ -93,14 +90,82 @@
 ### 2.2 探测方法学（一个必须记录的教训）
 
 首次探测用 `"hi"` 作为提示词，得到「所有模型都不思考」的错误结论。
-原因是模型对无需推理的输入本就��产生思考块 —— 这是**假阴性**。
+原因是模型对无需推理的输入本就不产生思考块 —— 这是**假阴性**。
 
 改用能引发推理的提示词（`"What is 17*23? Think it through."`）后，
 6 个可用模型**全部**产生 `thinking` 块。
 
 **结论：能力探测的提示词必须能稳定引发思考，否则结果不可信。**
 
-### 2.3 pi-ai 侧机制
+### 2.3 MiniMax 自己会给的规格（免费）
+
+**`maxTokens`（单次最大输出）直接写在错误消息里**，且因为在生成前就被拒绝，**不计费**：
+
+```
+invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)
+invalid params, model[MiniMax-M3]   does not support max tokens > 524288 (2013)
+```
+
+探法：发一个 `max_tokens` 远超上限的请求，读回错误消息里的数字。
+
+**`contextWindow` 无法这样拿到** —— 超限只给一句没有数字的
+`invalid params, context window exceeds limit (2013)`。
+二分探测不可行：输入按 token 真实计费（10 000 字符 → 1 255 token，
+400 000 字符 → 50 074 token），在 204 800 附近二分一轮就是几十万 token。
+
+**`input` 模态不构成 API 层限制** —— 给四个模型都发一张 1×1 PNG，全部接受，
+包括 pi-ai 标成纯文本的 M2.7。pi-ai catalog 里的 `input: [text]` 是**客户端策略**，
+不是 MiniMax 的约束。
+
+### 2.4 二手规格源互相矛盾
+
+| 源 | M2.7 上下文 | M2.7 最大输出 | M3 上下文 | M3 最大输出 | 收录 M3.1-Flash |
+| --- | --- | --- | --- | --- | --- |
+| **MiniMax API（权威）** | 边界 15 万✓ / 50 万✗ | **196 608** | 边界 62 万✓ / 250 万✗ | **524 288** | — |
+| models.dev `minimax-cn` | 204 800 | 131 072 | 1 000 000 | 524 288 | 是 |
+| OpenRouter | 196 608 | 176 947 | 1 048 576 | 512 000 | 是 |
+| pi-ai 内置 catalog | 204 800 | 131 072 | 1 000 000 | 512 000 | **否** |
+| pi-ai npm 1.5.2 | 204 800 | 131 072 | 1 000 000 | 524 288 | 是 |
+| 用户手写 | 204 800 | 131 072 | 1 000 000 | 512 000 | 是 |
+
+结论：
+
+- **上下文窗口**用 models.dev（与 API 实测边界吻合），二手源之间只差 2%–5%。
+- **最大输出**必须用 MiniMax API 探测 —— 二手源在 M2.7 上差了 50%（131 072 vs 196 608）。
+- **pi-ai 内置 catalog 不能作为数据源**：缺 M3.1-Flash，且 M3 的 `maxTokens` 偏小。
+
+### 2.5 官方规格库：models.dev
+
+`https://models.dev/api.json` 是公开的机器可读规格库，含 `minimax-cn` 与
+`minimax-cn-coding-plan` 两个 provider（**与用户的路由对应**）。
+每个模型条目提供：
+
+```json
+"MiniMax-M3.1-Flash": {
+  "limit": { "context": 1000000, "output": 524288 },
+  "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
+  "reasoning": true,
+  "reasoning_options": [{ "type": "effort", "values": ["low","medium","high","xhigh","max"] }],
+  "cost": { "input": 0.1494, "output": 0.5976, "cache_read": 0.0149 },
+  "release_date": "2026-10-19"
+}
+```
+
+**`reasoning_options` 直接回答了「哪些模型支持思考强度」**：
+
+| 模型 | reasoning | reasoning_options | 含义 |
+| --- | --- | --- | --- |
+| MiniMax-M3.1-Flash | ✅ | `[{type:'effort', values:[low,medium,high,xhigh,max]}]` | **支持思考强度档位** |
+| MiniMax-M3 | ✅ | `[{type:'toggle'}]` | 只能开 / 关 |
+| MiniMax-M2 / M2.1 / M2.5 / M2.7 / *-highspeed | ✅ | `[]` | 思考，但无档位 |
+
+用户手写配置只给 M3.1-Flash 配了 `reasoningEfforts` 档位 —— **与 models.dev 完全一致**。
+
+运行时的限制：models.dev **没有 per-provider 端点**
+（`/api/minimax-cn.json` 返回 HTML 404 页；`?provider=` 参数不生效），
+整个库 235 个 provider、6 MB（gzip 614 KB）。
+
+### 2.6 pi-ai 侧机制
 
 | 事实 | 位置 |
 | --- | --- |
@@ -108,28 +173,13 @@
 | `settings.write(ns, change, expected, paths)` 写入 profile patch | `dsh-settings/lib/index.js:501` |
 | `settings.describe()` 返回 `{ ns, revision, value, … }` | `dsh-settings/lib/index.js:414` |
 | 模型条目必填 `id`，另需 `name`/`contextWindow`/`maxTokens`/`input` | `dsh-llm-pi-ai/lib/index.js:1045` |
-| `reasoningEfforts` 可为 `false`（明确不支持思考） | `dsh-llm-pi-ai/lib/index.js:1042` |
+| `reasoningEfforts` 可为 `false`（不提供档位） | `dsh-llm-pi-ai/lib/index.js:1042` |
 | 声明 `models` 会**整体替换** catalog；`modelOverrides` 无法新增 catalog 外的模型 | `dsh-llm-pi-ai/lib/index.js:668` |
 | `forceAdaptiveThinking` = 强制用 adaptive 思考格式，与「是否支持思考」无关 | pi-ai `compat-schema` |
 | `forceAdaptiveThinking: true` → `thinking:{type:'adaptive'}` + `output_config.effort` | `anthropic-messages.js:945` |
 | 否则 → `thinking:{type:'enabled', budget_tokens:N}`，且 `xhigh`/`max` 被压成 `high` | `simple-options.js:66` |
 | adaptive 格式在 MiniMax 上实测**可用**，且档位精确传递 | 实测 |
 | `configEditor` / `profileContext` 都是插件可达的服务 | `dsh-config-editor/lib/index.js:19` |
-
-### 2.4 内置 catalog 不可信
-
-pi-ai 的 catalog，DSH 内置版本与 npm 最新版（1.5.2）**并不一致**：
-
-| 模型 | DSH 内置 catalog | npm pi-ai 1.5.2 |
-| --- | --- | --- |
-| MiniMax-M2.7 | ctx 204 800 / max 131 072 | 同左 |
-| MiniMax-M2.7-highspeed | ctx 204 800 / max 131 072 | 同左 |
-| MiniMax-M3 | ctx 1 000 000 / **max 512 000** | ctx 1 000 000 / **max 524 288** |
-| MiniMax-M3.1-Flash | **缺失** | ctx 1 000 000 / max 524 288 |
-
-结论：catalog 只能作为参考，**不能作为插件的数据源**。用户手写的 M3 条目
-（`maxTokens: 512000`）恰好等于 DSH 内置 catalog 的值 —— 说明用户当时抄的是内置 catalog，
-而不是 npm 上的新值。
 
 ---
 
@@ -138,18 +188,19 @@ pi-ai 的 catalog，DSH 内置版本与 npm 最新版（1.5.2）**并不一致**
 ### 做
 
 - 保留额度显示（Host 半侧 + 浏览器半侧）
-- 自动发现 MiniMax 模型并写入 `llm-pi-ai` 的 `providers.minimax-cn.models`
-- 实测每个模型是否可用、是否支持思考，据此生成模型条目
-- 变更提醒（新增 / 移除）
+- 自动发现 MiniMax 新模型并**追加**到 `llm-pi-ai` 的 `providers.minimax-cn.models`
+- 新模型的思考档位按 models.dev 的 `reasoning_options` + 实测决定
+- 新增模型时提醒
 - 手动同步按钮
 
 ### 不做
 
+- **不修改、不覆盖、不删除**用户已有的模型条目
+- **不自动删除**已下线的模型（`/v1/models` 混着 3 个已下线模型，但删不删由用户决定）
 - **不并入** `@local/dsh-pet-minimax-balance`（桌宠气泡）。它走 dsh-pet 特有的扩展点
   `petApi7340.balance.register`，与本插件结构无关，保持独立。
 - **不修改** DSH 内置的 pi-ai catalog（那是 App 包内的静态文件）。
 - **不发布到 npm**。分发渠道是 GitHub 仓库。
-- **不跨重启持久化「钉住某个模型」**。撤销只在本次会话内有效（见 §7）。
 
 ---
 
@@ -159,17 +210,17 @@ pi-ai 的 catalog，DSH 内置版本与 npm 最新版（1.5.2）**并不一致**
 dsh-minimax
 ├── index.js    Host 半侧
 │   ├── fetchQuota()        GET /v1/coding_plan/remains        （现有）
-│   ├── fetchModelIds()     GET /v1/models                     （候选清单）
-│   ├── probeModel()        POST /anthropic/v1/messages       （可用性 + 思考能力）
-│   ├── MODEL_METADATA      静态表：窗口大小 / 模态             （API 不提供的部分）
-│   └── syncModels()        合并 → settings.write('llm-pi-ai')
+│   ├── fetchModelIds()     GET /v1/models                     （候选 id）
+│   ├── probeMaxTokens()    POST /anthropic/v1/messages       （超限 → 免费读上限）
+│   ├── probeThinking()     POST /anthropic/v1/messages       （是否思考）
+│   ├── MODEL_SPECS         内置快照：contextWindow / 模态 / reasoning_options
+│   └── syncModels()        仅追加 → settings.write('llm-pi-ai')
 ├── client.js   浏览器半侧
 │   ├── 额度药丸 + 点击详情面板                                （现有）
-│   └── 面板内「模型」区：已同步列表 + 变更提醒 + 同步按钮
+│   └── 面板内「模型」区：已同步列表 + 新增提醒 + 同步按钮
 └── 路由
     GET  /plugin/minimax/status    额度 + 模型状态 + 上次同步结果
-    POST /plugin/minimax/sync      立刻全量同步一次
-    POST /plugin/minimax/undo      撤销上一步删除
+    POST /plugin/minimax/sync      立刻同步一次
 ```
 
 ### 依赖
@@ -183,50 +234,76 @@ export const inject = ['credentials', 'settings']
 
 ---
 
-## 5. 模型发现与能力探测
+## 5. 参数来源
 
-### 5.1 三步流水线
+每个模型条目的字段来自三个地方，**没有一个字段靠猜**：
+
+| 字段 | 来源 | 成本 |
+| --- | --- | --- |
+| `id` | MiniMax `/v1/models` | 免费 |
+| `name` | 同上 | 免费 |
+| `maxTokens` | **探测**：发一个 `max_tokens` 超限的请求，读错误消息里的数字 | **免费**（生成前拒绝） |
+| `contextWindow` | 内置的 models.dev 快照 | 免费 |
+| `input` 模态 | 内置的 models.dev 快照 | 免费 |
+| `reasoningEfforts` | models.dev 的 `reasoning_options` 决定**档位形态**；实测决定**是否思考** | 约 40 token/模型 |
+| `compat.forceAdaptiveThinking` | 仅当该模型支持 effort 档位时设 `true` | — |
+| 是否写入列表 | **探测**：已下线（`no longer available`）的不写 | 一条短消息 |
+
+### 5.1 为什么给支持档位的模型设 `forceAdaptiveThinking`
+
+| 格式 | 档位传递 |
+| --- | --- |
+| 预算式（不设） | `xhigh`/`max` 被 `clampReasoning` 压成 `high`，思考预算上限 16 384 |
+| 自适应式（设） | `output_config.effort` 原样传 `max`/`xhigh`，档位精确 |
+
+用户 `max` 档的意图是「思考到底」，压成 `high` 不是本意。自适应格式在 MiniMax 上实测可用
+（thinking 109 字），所以给支持 effort 档位的模型设上。
+
+只有 M3.1-Flash 这类模型需要；M3 与 M2.x 系列只有 toggle 或无档位，不设。
+
+### 5.2 探测流程（只对「待补充的新模型」执行）
 
 ```
-① GET /v1/models
-   → 候选 id 列表（含已下线的，不可信）
-
-② 对每个候选发一次探测请求
-   POST https://api.minimaxi.com/anthropic/v1/messages
-   { model, max_tokens: 8192, messages: [{role:'user', content:'What is 17*23? Think it through.'}],
-     thinking: { type: 'enabled', budget_tokens: 4096 } }
-   → 报错「no longer available」  ⇒ 已下线，不写入
-   → 成功且返回含 thinking 块      ⇒ 支持思考
-   → 成功但无 thinking 块          ⇒ 不支持思考
-
-③ 用静态表补齐 API 不提供的元数据
-   contextWindow / maxTokens / input 模态
+对每个候选 id：
+  ① POST /anthropic/v1/messages  { model, max_tokens: 999999999, messages: [{role:'user',content:'hi'}] }
+     ├─ 错误含 "does not support max tokens > N" → 记下 N（= maxTokens），免费
+     ├─ 错误含 "no longer available"             → 该模型已下线，跳过
+     └─ 无错误（说明 max_tokens 小于上限）      → 记 999999999 为上限，继续下一步
+  ② POST /anthropic/v1/messages  { model, max_tokens: 8192,
+                                    messages:[{role:'user',content:'What is 17*23? Think it through.'}],
+                                    thinking:{type:'enabled', budget_tokens:4096} }
+     ├─ 返回含 thinking 块 → 支持思考
+     └─ 不含                → 不支持思考
 ```
 
-探测使用**预算式** thinking，这是 pi-ai 在不设 `forceAdaptiveThinking` 时的默认路径，
+② 用**预算式** thinking，这是 pi-ai 在不设 `forceAdaptiveThinking` 时的默认路径，
 测的就是真实使用路径。
 
-### 5.2 静态元数据表
+### 5.3 内置规格快照
 
-只存 API 不给、且实测无法推导的信息：
+插件内置 models.dev 的 `minimax-cn` provider 快照（约 2 KB），覆盖 9 个已知模型：
 
-| 模型 | contextWindow | maxTokens | input |
+| 模型 | contextWindow | 模态 | reasoning_options |
 | --- | --- | --- | --- |
-| MiniMax-M3.1-Flash | 1 000 000 | 524 288 | text, image |
-| MiniMax-M3 | 1 000 000 | 524 288 | text, image |
-| MiniMax-M2.7-highspeed | 204 800 | 131 072 | text |
-| MiniMax-M2.7 | 204 800 | 131 072 | text |
-| MiniMax-M2.5-highspeed | 204 800 | 131 072 | text |
-| MiniMax-M2.5 | 204 800 | 131 072 | text |
+| MiniMax-M3.1-Flash | 1 000 000 | text, image, video | effort（5 档） |
+| MiniMax-M3 | 1 000 000 | text, image, video | toggle |
+| MiniMax-M2.7 | 204 800 | text | 无 |
+| MiniMax-M2.7-highspeed | 204 800 | text | 无 |
+| MiniMax-M2.5 | 204 800 | text | 无 |
+| MiniMax-M2.5-highspeed | 204 800 | text | 无 |
+| MiniMax-M2.1 / M2.1-highspeed / M2 | 204 800 | text | 无 |
 
-**表里没有「是否支持思考」这一列** —— 那是实测结论，写死就会像 pi-ai 的 catalog 一样过期。
+快照里的模型 `input` 模态按 models.dev 原样保留（`video` 也保留 —— API 层不拦）。
 
-表里没有的新模型：用保守默认值（`contextWindow` 1 000 000、`maxTokens` 131 072、`input` [text]），
-并在面板上标记「未验证」。
+**快照里没有的新模型**：用保守默认值（`contextWindow` 1 000 000、`maxTokens` 用探测值、
+`input` [text]、`reasoningEfforts: false`），并在面板上标记「未验证」。
 
-### 5.3 生成的模型条目
+**运行时不拉 models.dev** —— 整个库 6 MB，没有 per-provider 端点，
+为了一次同步下载 235 个 provider 的规格不值。快照随插件更新。
 
-支持思考的模型：
+### 5.4 生成的模型条目
+
+支持 effort 档位的模型：
 
 ```yaml
 - id: MiniMax-M3.1-Flash
@@ -244,70 +321,53 @@ export const inject = ['credentials', 'settings']
     forceAdaptiveThinking: true
 ```
 
-不支持思考的模型：
+只支持 toggle 或无档位的模型：
 
 ```yaml
 - id: MiniMax-M2.7
   name: MiniMax-M2.7
   contextWindow: 204800
-  maxTokens: 131072
+  maxTokens: 196608
   input: [text]
   reasoningEfforts: false
 ```
 
-### 5.4 为什么给支持思考的模型都设 `forceAdaptiveThinking`
-
-| 格式 | 档位传递 |
-| --- | --- |
-| 预算式（不设） | `xhigh`/`max` 被 `clampReasoning` 压成 `high`，思考预算上限 16 384 |
-| 自适应式（设） | `output_config.effort` 原样传 `max`/`xhigh`，档位精确 |
-
-用户 `max` 档的意图是「思考到底」，压成 `high` 不是本意。自适应格式在 MiniMax 上实测可用，
-所以给所有实测支持思考的模型都设上。
-
-### 5.5 探测频率
-
-| 时机 | 探测范围 |
-| --- | --- |
-| 插件启动 | 只探**当前列表里没有**的候选（新模型自动发现） |
-| 每 24 小时 | 全量探测（发现下线） |
-| 手动点「同步」 | 全量探测 |
-
-「上次全量探测时间」持久化在插件自己的 profile 行里（`config.lastFullProbeAt`），
-经 `ctx.configEditor.edit()` 写入。
-
-成本：全量探测 = 9 次请求，约 600 output tokens。
-
 ---
 
-## 6. 同步算法
+## 6. 同步算法（只增不删不覆盖）
+
+核心原则：**用户已有的条目，插件一个字都不动。**
 
 ```
-读当前 providers['minimax-cn'].models
+读当前 providers['minimax-cn'].models  →  已有列表
+读插件自己的 config.addedModels        →  插件已添加过的 id 集合
+读 GET /v1/models                      →  候选 id
   ↓
-探测全部候选 → 得到 { 可用模型 → 是否思考 }
-  ↓ 构造目标列表（按 id 排序）
-  ├─ 探测通过的模型：按 §5.3 生成条目
-  ├─ 探测报「已下线」：从列表移除
-  └─ 当前列表里有、但不在候选里的（用户手加的）：保留，不动
+待补充 = 候选 id 中：
+   ├─ 不在「已有列表」里            （完全没出现过）
+   └─ 不在「插件已添加过」集合里     （用户手动删过 → 不再自动加回）
   ↓
-与当前列表逐字段比较
+对每个「待补充」id 探测（§5.2）
+  ├─ 已下线          → 跳过，不写入
+  ├─ 探测失败        → 跳过，不写入，记日志
+  └─ 探测成功        → 生成条目
+  ↓
+把新条目**追加**到已有列表末尾
+  ↓
+与「已有列表 + 新条目」逐字段比较
   ├─ 完全相同 → 不写，不动任何文件
   └─ 有差异   → settings.write('llm-pi-ai', …, revision, ['providers','minimax-cn','models'])
-  ↓
-记录变更（新增 id 列表、移除 id 列表），供提醒使用
+                并把新 id 记入 config.addedModels（经 configEditor.edit 写入）
 ```
 
-### 6.1 三道删除护栏
+### 6.1 「只增不删」带来的两个推论
 
-自动删除是危险动作，因此：
+**已下线的模型留在列表里。** `/v1/models` 里混着 3 个已下线模型，插件不删它们
+（用户明确要求不强制删除）。插件**不会**把它们加进来（新条目必须探测通过），
+但如果用户已经手写了这些 id，插件也不动。
 
-| 情况 | 行为 |
-| --- | --- |
-| 探测请求整体失败 | **整次同步中止**，一个都不删，只记日志 |
-| 候选清单为空 | 同上，中止 |
-| 本次可用模型数比上次少一半以上 | **只增不删**，提醒里写明「API 返回异常偏少，已跳过删除」 |
-| 被删的是当前默认模型 | 照删，提醒里**红字标注**「默认模型已被移除，请重新选择」 |
+**用户删掉的模型不会被加回来。** 因为插件在 `config.addedModels` 里记住了自己加过哪些 id，
+用户手动删除后，插件认为那是用户的决定，不再自动补回。
 
 ### 6.2 并发保护
 
@@ -329,18 +389,12 @@ export const inject = ['credentials', 'settings']
 
 DSH 没有给插件用的 toast 服务（`toast` 相关命中全是 CSS 变量），因此提醒落在插件自己的界面上：
 
-1. **药丸上的提醒标记** —— 有未读变更时，药丸带一个小圆点，不点开也能看见。
-2. **详情面板的「模型变更」区** —— 列出新增了哪些、移除了哪些、什么时间。
-3. **移除那一行带「撤销」按钮** —— 一键恢复上一次的完整列表。
-4. **Host 日志** —— 同步记一行。
+1. **药丸上的提醒标记** —— 有新增模型时，药丸带一个小圆点，不点开也能看见。
+2. **详情面板的「模型」区** —— 列出已同步的模型、新增了哪些、什么时间。
+3. **Host 日志** —— 同步记一行。
 
-### 撤销的语义
-
-撤销恢复**上一次完整列表**，并把被移除的 id 记入本次会话的「保留集」，
-使后续同步不再删除它们。
-
-**保留集不跨重启持久化。** 插件每次启动都会同步，所以跨重启保留某个模型需要另一个机制
-（见 §3「不做」）。这是已知限制，README 中会写明。
+因为插件只新增不删除，所以没有「撤销删除」这一说。
+用户不想要某个新增模型，手动删掉即可，插件不会加回（§6.1）。
 
 ---
 
@@ -355,19 +409,35 @@ DSH 没有给插件用的 toast 服务（`toast` 相关命中全是 CSS 变量�
     providers:
       minimax-cn:
         apiKeyEnv: MINIMAX_CN_API_KEY
-        # models 由 dsh-minimax 插件自动维护
+        models:
+          # 用户手写的三条保持原样，插件一个字都不动
+          - id: MiniMax-M2.7-highspeed
+            ...
+          - id: MiniMax-M3
+            ...
+          - id: MiniMax-M3.1-Flash
+            ...
+          # 插件追加的新模型出现在这里
 ```
 
-### 8.2 凭据安全
+### 8.2 插件自己的状态
+
+插件用自己那一行存状态（`config.addedModels`），经 `ctx.configEditor.edit()` 写入 profile patch：
+
+```yaml
+- id: minimax
+  name: "dsh-minimax"
+  config:
+    credentialRef: MINIMAX_CN_API_KEY
+    addedModels:
+      - MiniMax-M3.1-Flash
+```
+
+### 8.3 凭据安全
 
 - 仓库里**只有引用名** `MINIMAX_CN_API_KEY`，没有密钥
 - 密钥经 `ctx.credentials.resolve()` 在 Host 侧按请求解析
 - 浏览器只拿到百分比、时间戳、模型 id 列表 —— 没有任何密钥材料
-
-### 8.3 一个已知的取舍
-
-「全自动」意味着**用户手改模型条目会被插件覆盖**。内置表里的模型，下次启动就恢复成表里的值。
-表里没有的模型（标着「未验证」）只补缺失字段，不动用户已有的值。
 
 ---
 
@@ -376,10 +446,11 @@ DSH 没有给插件用的 toast 服务（`toast` 相关命中全是 CSS 变量�
 | 层 | 手段 |
 | --- | --- |
 | 额度解析 | 固定 fixture 喂给解析函数，断言百分比与重置时间 |
-| 模型条目生成 | 给定「探测结果 + 静态表」，断言生成的 YAML 结构 |
-| 同步合并 | 给定「当前列表 + 探测结果」，断言新增/移除/保留的判定 |
-| 删除护栏 | 给定「探测失败」「列表为空」「数量骤降」，断言不发生删除 |
-| 端到端 | 隔离 DSH profile，从 GitHub 安装，冷启动，断言药丸渲染与模型列表写入 |
+| 错误消息解析 | 断言能从 `does not support max tokens > N` 里取出 N |
+| 模型条目生成 | 给定「探测结果 + 规格快照」，断言生成的 YAML 结构 |
+| 同步合并 | 给定「已有列表 + 已添加集合 + 候选」，断言只追加、不修改、不删除 |
+| 删除护栏 | 断言已下线模型与探测失败的模型都不写入 |
+| 端到端 | 隔离 DSH profile，从 GitHub 安装，冷启动，断言药丸渲染与新模型被追加 |
 | 真实 API | 手动验证脚本，对真实 API 跑一次全量探测并打印对照表 |
 
 ---
@@ -387,7 +458,7 @@ DSH 没有给插件用的 toast 服务（`toast` 相关命中全是 CSS 变量�
 ## 10. 兼容性
 
 - **社区目录 PR #14276** 引用的是**仓库 URL**，不是包名 → 改包名不影响它。
-  但条目里的 `name` 字段是 `owner/repo` 形式，同样不受包名影响。**无需改动。**
+  条目里的 `name` 字段是 `owner/repo` 形式，同样不受包名影响。**无需改动。**
 - **市场索引** 里的条目 source 是 git，指向仓库 commit，与包名无关。
 - **`@local/dsh-pet-minimax-balance`** 保持独立安装，不受影响。
 
@@ -395,9 +466,9 @@ DSH 没有给插件用的 toast 服务（`toast` 相关命中全是 CSS 变量�
 
 ## 11. 实施顺序
 
-1. Host 半侧：探测 + 元数据表 + 条目生成（纯函数，先单测）
-2. Host 半侧：同步 + 护栏 + 写 pi-ai 配置
-3. 路由：`status` / `sync` / `undo`
+1. Host 半侧：探测（maxTokens / 可用性 / 思考）+ 规格快照 + 条目生成（纯函数，先单测）
+2. Host 半侧：同步（只追加）+ 并发保护 + 写 pi-ai 配置
+3. 路由：`status` / `sync`
 4. 浏览器半侧：药丸上的提醒标记 + 面板的「模型」区
 5. 迁移：改包名为 `dsh-minimax`、更新 patch 行 id、更新 README
 6. 端到端验证：隔离 profile + GitHub 安装 + 冷启动
@@ -407,9 +478,10 @@ DSH 没有给插件用的 toast 服务（`toast` 相关命中全是 CSS 变量�
 
 ## 12. 未决问题
 
-- **保留集跨重启持久化**：需要时再做（可考虑用 `configEditor.edit` 写插件自己的行）。
-- **探测提示词**：实现时确认一句中文提示词能否稳定引发思考；若不稳定，用固定英文提示词。
-- **`maxTokens` 取值**：静态表用 npm pi-ai 1.5.2 的值（M3 系 524 288、M2.7 系 131 072）。
-  DSH 内置 catalog 对 M3 写的是 512 000，用户手写的也是 512 000 —— 同步后 M3 的
-  `maxTokens` 会从 512 000 变成 524 288（+2.4%）。这是有意的：取较新的官方值。
-  若用户不同意，改静态表即可。
+- **规格快照的更新方式**：内置快照随插件版本更新。若将来想自动刷新，
+  可选 OpenRouter 的 `/api/v1/models`（845 KB，比 models.dev 的 6 MB 小），但它的
+  MiniMax 条目更少、且没有 `reasoning_options`。当前决定不自动刷新。
+- **`input` 模态要不要含 `video`**：models.dev 标了 video，但 pi-ai 的 `MODALITIES`
+  是否接受 video 需要在实现时确认；不接受则只保留 text / image。
+- **`maxTokens` 用 API 的硬上限还是 models.dev 的值**：本设计用 API 的硬上限
+  （M2.7 会是 196 608 而非 131 072）。若实际使用中遇到问题，改回快照值即可。
