@@ -3529,6 +3529,12 @@ grep -n -A 30 "minimax-cn" "$PROFILE_DIR/cordis.patch.yml"
 
 Expected: the `models:` list under `providers.minimax-cn` carries entries with `contextWindow`, `maxTokens`, `input` and `reasoningEfforts`.
 
+The bundle itself is registered in the profile's `package.json`, not in the patch — check it too:
+
+```bash
+grep -n "dsh-minimax" "$PROFILE_DIR/package.json"
+```
+
 - [ ] **Step 6: Verify the sync route answers**
 
 ```bash
@@ -3563,7 +3569,7 @@ for M in MiniMax-M3.1-Flash MiniMax-M3 MiniMax-M2.7 MiniMax-M2; do
 done
 ```
 
-Expected: the three live models report their cap (`does not support max tokens > …`), and `MiniMax-M2` reports `no longer available`.
+Expected: every model reports its cap (`does not support max tokens > …`) — including `MiniMax-M2`, which answers the cap request first and only says `no longer available` on a *second* request. Ask it twice to see both answers.
 
 - [ ] **Step 10: Push the branch**
 
@@ -3590,7 +3596,7 @@ node -e "
   if (!entry) throw new Error('market entry not found');
   entry.version = '1.1.0';
   entry.commit = process.argv[1];
-  entry.publishTimestamp = new Date().toISOString();
+  entry.publishTimestamp = Math.floor(Date.now() / 1000);
   entry.description = {
     en: 'Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile\'s MiniMax model list current by appending newly released models.',
     zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度，并把新发布的模型追加到配置的模型列表里。',
