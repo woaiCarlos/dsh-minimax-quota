@@ -686,10 +686,14 @@ Append to `test/probe.test.js`:
 test('probeModel reads the output cap from a refusal without generating', async () => {
   const bodies = []
   const fetchImpl = async (_url, init) => {
-    bodies.push(JSON.parse(init.body))
-    return jsonResponse({
-      error: { message: 'invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)' },
-    })
+    const body = JSON.parse(init.body)
+    bodies.push(body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)' },
+      })
+    }
+    return jsonResponse({ content: [{ type: 'text', text: '391' }] }, 200)
   }
   const result = await probeModel('MiniMax-M2.7', 'sk-test', { fetchImpl })
   assert.equal(result.status, 'ok')
@@ -1560,7 +1564,7 @@ test('buildStatusPayload reports the quota and the synced model ids', async () =
   })
   assert.equal(payload.quota.ok, true)
   assert.deepEqual(payload.models.synced, ['MiniMax-M3', 'MiniMax-M3.1-Flash'])
-  assert.equal(payload.models.added.length, 0)
+  assert.deepEqual(payload.models.added, ['MiniMax-M3.1-Flash'])
   assert.equal(payload.models.syncedAt, 1760000000000)
 })
 ```
@@ -1745,7 +1749,7 @@ export async function apply(ctx, config) {
   // so the route is never silently skipped.
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
-    throw new Error('dsh-minimax: the webServer service is unavailable, so the routes cannot be registered')
+    throw new Error('dsh-minimax-quota: the webServer service is unavailable, so the routes cannot be registered')
   }
 
   const send = (res, payload, status = 200) => {
@@ -1788,7 +1792,7 @@ export async function apply(ctx, config) {
       },
     }),
   ]
-  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax: routes')
+  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax-quota: routes')
 
   // The profile may still be loading, so the first sync waits for the pi-ai
   // namespace to appear before it gives up.
@@ -1830,21 +1834,21 @@ export const inject = ['webServer', 'credentials', 'settings']
 const Config = {
   '~standard': {
     version: 1,
-    vendor: 'dsh-minimax',
+    vendor: 'dsh-minimax-quota',
     validate(value) {
       const raw = value === undefined || value === null ? {} : value
       if (typeof raw !== 'object' || Array.isArray(raw)) {
-        return { issues: [{ message: 'dsh-minimax: config must be an object' }] }
+        return { issues: [{ message: 'dsh-minimax-quota: config must be an object' }] }
       }
       const issues = []
       const config = {}
       for (const [key, entry] of Object.entries(raw)) {
         if (key !== 'credentialRef') {
-          issues.push({ message: `dsh-minimax: unknown config field "${key}"`, path: [key] })
+          issues.push({ message: `dsh-minimax-quota: unknown config field "${key}"`, path: [key] })
           continue
         }
         if (typeof entry !== 'string' || entry.length === 0) {
-          issues.push({ message: 'dsh-minimax: credentialRef must be a non-empty string', path: [key] })
+          issues.push({ message: 'dsh-minimax-quota: credentialRef must be a non-empty string', path: [key] })
           continue
         }
         config.credentialRef = entry
@@ -1938,6 +1942,32 @@ Render it inside `QuotaPanel`, after the weekly section and before the fetched-a
 
 - [ ] **Step 4: Add the notice marker to the pill**
 
+The payload's `models.added` lists every model the plugin has ever added, so it
+never empties. A badge driven by it alone would therefore never clear. The badge
+marks "there are models you did not add by hand" and disappears once the user
+has opened the panel in this page load; the panel itself always lists the whole
+set, so nothing is lost.
+
+Add a piece of component state next to `open` in `MiniMaxQuotaPill`:
+
+```js
+const [noticeSeen, setNoticeSeen] = React.useState(false)
+```
+
+Compute the notice from the fetched payload:
+
+```js
+const hasNotice = !noticeSeen && (payload?.models?.added?.length ?? 0) > 0
+```
+
+Mark it seen when the panel opens:
+
+```js
+React.useEffect(() => {
+  if (open) setNoticeSeen(true)
+}, [open])
+```
+
 Add the styles for the models section and the marker to the stylesheet the client installs, using only theme tokens:
 
 ```js
@@ -1948,15 +1978,21 @@ Add the styles for the models section and the marker to the stylesheet the clien
 '.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warning);font-size:11px}',
 '.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
 '.__mmq_badge{position:absolute;top:-2px;right:-2px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}',
+'.__mmq_pillWrap{position:relative;display:inline-flex}',
 ```
 
-In `MiniMaxQuotaPill`, keep the fetched payload in a signal alongside the quota view, and render the badge when the payload carries added models:
+Render the badge inside a wrapper around the pill's existing content, and render it
+only while `hasNotice` is true:
 
 ```js
-const hasNotice = payload?.models?.added?.length > 0
+h('span', { className: '__mmq_pillWrap' },
+  existingPillButton,
+  hasNotice ? h('span', { className: '__mmq_badge', 'aria-hidden': true }) : null,
+)
 ```
 
-Wrap the pill's existing content in a `position:relative` container and add the badge element when `hasNotice` is true. Give that container `position:relative` in the pill style so the badge anchors to it.
+Keep the pill's own `__mmq_pill` class on the button, so the existing layout is
+unchanged.
 
 - [ ] **Step 5: Add the locale strings**
 
@@ -2025,7 +2061,7 @@ In `package.json`, change `"name": "dsh-minimax-quota"` to `"name": "dsh-minimax
 
 Bump the version to `1.1.0`.
 
-- [ ] **Step 2: Rename the client module id**
+- [ ] **Step 2: Rename the client module id and the Host's message prefix**
 
 In `client.js`, change the module id:
 
@@ -2035,7 +2071,39 @@ In `client.js`, change the module id:
 
 This must equal the package name exactly, or the Loader cannot find the browser half.
 
-- [ ] **Step 3: Rename the patch row**
+In `index.js`, the Host still labels itself `dsh-minimax-quota` in its error messages
+and in the schema vendor, while the package is named `dsh-minimax` from now on.
+Bring the two into step:
+
+```bash
+sed -i '' "s/dsh-minimax-quota:/dsh-minimax:/g; s/vendor: 'dsh-minimax-quota',/vendor: 'dsh-minimax',/g" index.js
+```
+
+After the sed, `index.js` must contain no `dsh-minimax-quota` string. Verify with:
+
+```bash
+grep -n "dsh-minimax" index.js
+```
+
+Expected: every occurrence reads `dsh-minimax`, none reads `dsh-minimax-quota`.
+
+- [ ] **Step 3: Rename the lockfile entry**
+
+The lockfile carries the package name in two places. Change both, so `npm ci` and
+`pnpm install` keep working:
+
+```bash
+node -e "
+  const fs = require('fs');
+  const file = 'package-lock.json';
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  data.name = 'dsh-minimax';
+  if (data.packages && data.packages['']) data.packages[''].name = 'dsh-minimax';
+  fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
+"
+```
+
+- [ ] **Step 4: Rename the patch row**
 
 In `cordis.patch.yml`:
 
@@ -2047,11 +2115,11 @@ In `cordis.patch.yml`:
         credentialRef: MINIMAX_CN_API_KEY
 ```
 
-- [ ] **Step 4: Update the plugin manifest**
+- [ ] **Step 5: Update the plugin manifest**
 
 In `dsh-plugin.json`, change the `id` and the `name` to read `dsh-minimax`, and update the `description` to mention the model sync. Keep the `version` in step with `package.json`.
 
-- [ ] **Step 5: Update the CI checks**
+- [ ] **Step 6: Update the CI checks**
 
 In `.github/workflows/ci.yml`, the patch check asserts the old name. Replace it:
 
@@ -2067,7 +2135,7 @@ In `.github/workflows/ci.yml`, the patch check asserts the old name. Replace it:
           "
 ```
 
-- [ ] **Step 6: Update the READMEs**
+- [ ] **Step 7: Update the READMEs**
 
 In `README.md` and `README.en.md`, replace every mention of `dsh-minimax-quota` as the **package** name with `dsh-minimax`. Keep the repository URL (`woaiCarlos/dsh-minimax-quota`) unchanged everywhere, because that is what the catalog entry points at.
 
@@ -2081,12 +2149,12 @@ Add a section describing the new behaviour, in the language of the file:
 
 and the English counterpart.
 
-- [ ] **Step 7: Run the checks**
+- [ ] **Step 8: Run the checks**
 
 Run: `npm test`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add package.json client.js cordis.patch.yml dsh-plugin.json README.md README.en.md .github/workflows/ci.yml package-lock.json
@@ -2135,18 +2203,26 @@ If the log carries no URL, read the port from the log with `grep -oE '127\.0\.0\
 
 - [ ] **Step 3: Install the plugin into the isolated instance**
 
+The plugin is installed into a *profile* directory, which is its own npm project
+(it carries a `package.json`). Find the profile directory and install there:
+
 ```bash
-cd "$DSH_HOME" 2>/dev/null || true
+PROFILE_DIR=$(find "$DSH_HOME/profiles" -maxdepth 1 -mindepth 1 -type d | head -1)
+echo "profile dir: $PROFILE_DIR"
+cd "$PROFILE_DIR"
 pnpm add "github:woaiCarlos/dsh-minimax-quota"
 ```
 
 Then check that the bundle patch reached the profile:
 
 ```bash
-grep -n "dsh-minimax" "$DSH_HOME/profiles/"*/cordis.patch.yml
+grep -n "dsh-minimax" "$PROFILE_DIR/cordis.patch.yml"
 ```
 
 Expected: one line naming `dsh-minimax`.
+
+If the profile directory has no `package.json` yet, wait for the instance to finish
+its first boot and re-run the step — the profile is created during boot.
 
 - [ ] **Step 4: Verify the status route answers**
 
@@ -2162,7 +2238,7 @@ Expected: a JSON object with a `quota` key and a `models` key.
 - [ ] **Step 5: Verify the profile received the models**
 
 ```bash
-grep -n -A 30 "minimax-cn" "$DSH_HOME/profiles/"*/cordis.patch.yml
+grep -n -A 30 "minimax-cn" "$PROFILE_DIR/cordis.patch.yml
 ```
 
 Expected: the `models:` list under `providers.minimax-cn` carries entries with `contextWindow`, `maxTokens`, `input` and `reasoningEfforts`.
