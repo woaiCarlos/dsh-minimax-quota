@@ -253,7 +253,7 @@ export async function apply(ctx, config) {
   // so the route is never silently skipped.
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
-    throw new Error('dsh-minimax-quota: the webServer service is unavailable, so the routes cannot be registered')
+    throw new Error('dsh-minimax: the webServer service is unavailable, so the routes cannot be registered')
   }
 
   const send = (res, payload, status = 200) => {
@@ -280,7 +280,7 @@ export async function apply(ctx, config) {
           // leave the browser's request pending forever and stop its polling.
           // The browser only learns that the request failed: the message
           // belongs on the Host side, where the operator can read it.
-          reportFailure(ctx, 'dsh-minimax-quota: the status route failed', error)
+          reportFailure(ctx, 'dsh-minimax: the status route failed', error)
           send(res, {
             quota: { ok: false, reason: 'request-failed' },
             models: { synced: [], added: [], syncedAt: null },
@@ -305,25 +305,25 @@ export async function apply(ctx, config) {
         } catch (error) {
           // The browser only ever receives a fixed reason, so a failure nobody
           // anticipated cannot carry an internal message into the page.
-          reportFailure(ctx, 'dsh-minimax-quota: the sync route failed', error)
+          reportFailure(ctx, 'dsh-minimax: the sync route failed', error)
           send(res, { ok: false, reason: 'sync-failed' })
         }
       },
     }),
   ]
-  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax-quota: routes')
+  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax: routes')
 
   // The profile may still be loading, so the first sync waits for the pi-ai
   // namespace to appear before it gives up. The pending attempt is called off
   // with the plugin, so a plugin that is unloaded inside that window never
   // writes the profile afterwards.
   const cancelFirstSync = scheduleSync(ctx, credentialRef)
-  ctx.effect(() => cancelFirstSync, 'dsh-minimax-quota: first sync')
+  ctx.effect(() => cancelFirstSync, 'dsh-minimax: first sync')
 
   // The plugin also probes once a day, so a model MiniMax releases while the
   // plugin is running still arrives without the user restarting anything.
   const cancelDailySync = scheduleDailySync(ctx, credentialRef)
-  ctx.effect(() => cancelDailySync, 'dsh-minimax-quota: daily sync')
+  ctx.effect(() => cancelDailySync, 'dsh-minimax: daily sync')
 }
 
 /**
@@ -429,7 +429,7 @@ function scheduleDailySync(ctx, credentialRef) {
       if (cancelled) return
       try {
         const result = await runSync(ctx, { credentialRef })
-        ctx.logger?.info?.('%s: %s', 'dsh-minimax-quota: the daily sync found', result.ok ? 'no new model' : result.reason)
+        ctx.logger?.info?.('%s: %s', 'dsh-minimax: the daily sync found', result.ok ? 'no new model' : result.reason)
       } catch (error) {
         reportFailure(ctx, 'the daily sync failed', error)
       }
@@ -456,21 +456,21 @@ export const inject = ['webServer', 'credentials', 'settings']
 const Config = {
   '~standard': {
     version: 1,
-    vendor: 'dsh-minimax-quota',
+    vendor: 'dsh-minimax',
     validate(value) {
       const raw = value === undefined || value === null ? {} : value
       if (typeof raw !== 'object' || Array.isArray(raw)) {
-        return { issues: [{ message: 'dsh-minimax-quota: config must be an object' }] }
+        return { issues: [{ message: 'dsh-minimax: config must be an object' }] }
       }
       const issues = []
       const config = {}
       for (const [key, entry] of Object.entries(raw)) {
         if (key !== 'credentialRef') {
-          issues.push({ message: `dsh-minimax-quota: unknown config field "${key}"`, path: [key] })
+          issues.push({ message: `dsh-minimax: unknown config field "${key}"`, path: [key] })
           continue
         }
         if (typeof entry !== 'string' || entry.length === 0) {
-          issues.push({ message: 'dsh-minimax-quota: credentialRef must be a non-empty string', path: [key] })
+          issues.push({ message: 'dsh-minimax: credentialRef must be a non-empty string', path: [key] })
           continue
         }
         config.credentialRef = entry

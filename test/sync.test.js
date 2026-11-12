@@ -654,9 +654,9 @@ test('the daily sweep is registered as an effect of its own', async () => {
     // The startup attempt and the daily sweep are two separate effects, so
     // unloading the plugin cancels both of them.
     assert.deepEqual(ctx.effectLabels, [
-      'dsh-minimax-quota: routes',
-      'dsh-minimax-quota: first sync',
-      'dsh-minimax-quota: daily sync',
+      'dsh-minimax: routes',
+      'dsh-minimax: first sync',
+      'dsh-minimax: daily sync',
     ])
   } finally {
     disposeAll(ctx)
@@ -685,7 +685,7 @@ test('the daily sweep runs one sync when the day elapses', async (t) => {
     await apply(ctx, {})
     // The startup attempt is called off, so the only sync that can run is
     // the daily sweep.
-    disposeEffect(ctx, 'dsh-minimax-quota: first sync')
+    disposeEffect(ctx, 'dsh-minimax: first sync')
 
     // The day has not passed yet, so nothing has run.
     t.mock.timers.tick(DAY_MS - 1)
@@ -736,7 +736,7 @@ test('a second sweep does not probe a model the plugin already added', async (t)
   }
   try {
     await apply(ctx, {})
-    disposeEffect(ctx, 'dsh-minimax-quota: first sync')
+    disposeEffect(ctx, 'dsh-minimax: first sync')
 
     // The first sweep measures the model MiniMax offers and adds it.
     t.mock.timers.tick(DAY_MS)

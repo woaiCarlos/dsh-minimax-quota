@@ -1,6 +1,6 @@
-# dsh-minimax-quota
+# dsh-minimax
 
-Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness chat composer: how much is left in the rolling 5-hour window and in the weekly window. Click the pill for the details.
+Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness chat composer: how much is left in the rolling 5-hour window and in the weekly window. Click the pill for the details. It also watches for models MiniMax has just released and appends them to your pi-ai model list.
 
 ![Pill and details panel](docs/screenshot-panel.png)
 
@@ -8,6 +8,7 @@ Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness cha
 - The pill reads `5h 95% · Week 37%`, each number with a status dot: green (>40%), amber (≤40%), red (≤15%).
 - Clicking opens a panel: remaining percentage per window, a progress bar, time until each window resets, and when the reading was fetched.
 - Follows the host light/dark theme; all visible text goes through the Harness locale service (Chinese and English included).
+- It also appends newly released MiniMax models to your configured model list — append only, your existing entries are untouched.
 
 ## Install
 
@@ -108,7 +109,7 @@ npm publish --otp=<6-digit code from your authenticator app>
 
 2. **The key stays in the Host process.** The Host half reads it with `ctx.credentials.resolve('MINIMAX_CN_API_KEY')` and uses the value only to build the `Authorization: Bearer …` header for the MiniMax request. It never appears in the JSON the route returns.
 
-3. **The browser never receives it.** The browser only calls the same-origin route `/plugin/minimax-quota`, which returns percentages and reset timestamps:
+3. **The browser never receives it.** The browser only calls the same-origin route `/plugin/minimax/status`, which returns percentages and reset timestamps:
 
    ```json
    {
@@ -156,10 +157,11 @@ Lookup order (the credential store's fixed precedence; the first place with a va
 If your key lives under another environment variable name, change the plugin config in `cordis.patch.yml`:
 
 ```yaml
-- id: minimax-quota
-  name: 'dsh-minimax-quota'
-  config:
-    credentialRef: MY_MINIMAX_KEY
+- insert:
+    - id: minimax
+      name: 'dsh-minimax'
+      config:
+        credentialRef: MY_MINIMAX_KEY
 ```
 
 ## Configuration
@@ -171,10 +173,16 @@ If your key lives under another environment variable name, change the plugin con
 ## How it works
 
 ```
-index.js    Host half: resolve credential → call MiniMax → serve the quota on the same-origin route /plugin/minimax-quota
+index.js    Host half: resolve credential → call MiniMax → serve the quota on the same-origin route /plugin/minimax/status
 client.js   Browser half: register a pill below the composer, click opens the details panel
 locale/     Chinese and English strings
 ```
+
+### Automatic model sync
+
+The plugin probes the models MiniMax has just released and appends them to the `providers.minimax-cn.models` list in the pi-ai configuration.
+Every new model is measured: whether it still answers, what its maximum output per call is, and whether it supports thinking.
+**The entries you already have are never modified or removed** — the plugin only appends. A model you deleted by hand is not added back either.
 
 ### Where the data comes from
 
@@ -202,7 +210,7 @@ The code tries three equivalent paths in turn (`coding_plan/remains`, `api/openp
 - **The Host half declares `inject: ['webServer']`.** This is required: the `webServer` service comes from the web app bundle and may load *after* this plugin. Without the declaration the plugin runs too early, silently skips registering the route, and the UI shows “cannot connect”.
 - **The reading refreshes every 60 seconds**, and again when you hover or click the pill.
 - **The pill only appears for MiniMax models.** An account with no plan quota (pay-as-you-go) hides the entry entirely rather than showing an empty reading.
-- This is a display-only plugin: it writes no session events, changes no model routing, and takes no part in the prompt.
+- The quota half is display-only: it writes no session events, never changes the selected model, and takes no part in the prompt. The model sync only appends entries to the end of the profile's MiniMax model list.
 
 ## Known limitations
 

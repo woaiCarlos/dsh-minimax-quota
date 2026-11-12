@@ -1,8 +1,9 @@
 {
   "$schema": "https://dsh.community/schemas/dsh-plugin-0.15.json",
-  "id": "com.woaicarlos.dsh-minimax-quota",
-  "name": "dsh-minimax-quota",
-  "version": "1.0.0",
+  "id": "com.woaicarlos.dsh-minimax",
+  "name": "dsh-minimax",
+  "version": "1.1.0",
+  "description": "Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile's MiniMax model list current by appending newly released models.",
   "manifestVersion": "0.15",
   "facets": {
     "host": {

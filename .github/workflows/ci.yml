@@ -15,10 +15,8 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Check JavaScript syntax
-        run: |
-          node --check index.js
-          node --check client.js
+      - name: Run the test suite
+        run: npm test
 
       - name: Validate JSON manifests
         run: |
@@ -35,7 +33,7 @@ jobs:
             const fs = require('fs');
             const text = fs.readFileSync('cordis.patch.yml', 'utf8');
             if (!/^\s*-\s*insert:/m.test(text)) throw new Error('patch has no insert list');
-            if (!/name:\s*'dsh-minimax-quota'/.test(text)) throw new Error('patch does not insert this package');
+            if (!/name:\s*'dsh-minimax'/.test(text)) throw new Error('patch does not insert this package');
             console.log('ok cordis.patch.yml');
           "
 

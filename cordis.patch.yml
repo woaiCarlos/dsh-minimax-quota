@@ -1,5 +1,5 @@
 - insert:
-    - id: minimax-quota
-      name: 'dsh-minimax-quota'
+    - id: minimax
+      name: 'dsh-minimax'
       config:
         credentialRef: MINIMAX_CN_API_KEY

@@ -1,6 +1,6 @@
-# dsh-minimax-quota
+# dsh-minimax
 
-在 DeepSeek Harness 的对话输入框下方，显示 **MiniMax 编程套餐（Coding Plan）剩余额度**：5 小时滚动窗口和周窗口各剩多少百分比。点击后弹出详情面板。
+在 DeepSeek Harness 的对话输入框下方，显示 **MiniMax 编程套餐（Coding Plan）剩余额度**：5 小时滚动窗口和周窗口各剩多少百分比。点击后弹出详情面板。同时，插件会探测 MiniMax 新发布的模型，把它们自动补进你的 pi-ai 模型列表。
 
 ![药丸与详情面板](docs/screenshot-panel.png)
 
@@ -8,6 +8,7 @@
 - 药丸显示 `5小时 95% · 周 37%`，两个数字各带一个状态圆点：绿（>40%）、橙（≤40%）、红（≤15%）。
 - 点击弹出面板：每个窗口的剩余百分比、进度条、距离重置还有多久、数据更新时间。
 - 支持明暗主题；界面文案走 Harness 的 locale 服务（内置中英文）。
+- 还会自动把 MiniMax 新发布的模型补进配置里的模型列表 —— 只追加，不动你已有的条目。
 
 ## 安装
 
@@ -113,7 +114,7 @@ npm publish --otp=<验证器 App 的 6 位码>
 
 2. **密钥只存在于宿主进程。** 读取密钥的是 Host 半侧，通过 `ctx.credentials.resolve('MINIMAX_CN_API_KEY')` 从 Harness 的凭据存储里取，取到的值只用来拼 `Authorization: Bearer …` 请求头发给 MiniMax，**不会出现在路由返回的 JSON 里**。
 
-3. **浏览器全程拿不到密钥。** 浏览器只请求同源路由 `/plugin/minimax-quota`，拿到的只有百分比和重置时间戳：
+3. **浏览器全程拿不到密钥。** 浏览器只请求同源路由 `/plugin/minimax/status`，拿到的只有百分比和重置时间戳：
 
    ```json
    {
@@ -163,10 +164,11 @@ minimax-cn  →  MINIMAX_CN_API_KEY
 如果你把 Key 存在了别的环境变量名里，改插件配置即可，在 `cordis.patch.yml` 里：
 
 ```yaml
-- id: minimax-quota
-  name: 'dsh-minimax-quota'
-  config:
-    credentialRef: MY_MINIMAX_KEY
+- insert:
+    - id: minimax
+      name: 'dsh-minimax'
+      config:
+        credentialRef: MY_MINIMAX_KEY
 ```
 
 ## 配置
@@ -178,10 +180,16 @@ minimax-cn  →  MINIMAX_CN_API_KEY
 ## 工作原理
 
 ```
-index.js    Host 半侧：解析凭据 → 调 MiniMax → 通过同源路由 /plugin/minimax-quota 返回额度
+index.js    Host 半侧：解析凭据 → 调 MiniMax → 通过同源路由 /plugin/minimax/status 返回额度
 client.js   浏览器半侧：在对话输入框下方注册一个药丸，点击弹出详情面板
 locale/     中英文文案
 ```
+
+### 模型自动补充
+
+插件会探测 MiniMax 新发布的模型，把它们追加到 pi-ai 配置的 `providers.minimax-cn.models` 里。
+每个新模型都会实测：是否还能调用、单次最大输出是多少、是否支持思考。
+**你已有的条目不会被修改或删除** —— 插件只追加。手动删掉的模型也不会被加回来。
 
 ### 数据来源
 
@@ -209,7 +217,7 @@ Authorization: Bearer <你的 Key>
 - **Host 半侧声明了 `inject: ['webServer']`**。这是必需的：`webServer` 服务由 web 应用包提供，可能晚于本插件加载；不声明依赖的话插件会在启动时抢跑，拿不到服务就静默跳过，路由注册不上（表现为界面显示「无法连接」）。
 - **额度每 60 秒刷新一次**，鼠标移到药丸上或点击时也会重新拉一次。
 - **只在选中 MiniMax 模型时显示**；没有套餐额度（比如按量计费的账号）时整个药丸隐藏，不会显示空读数。
-- 纯展示插件，不写任何会话事件，不改模型路由，不参与 prompt。
+- 额度那部分是纯展示：不写任何会话事件，不改当前选中的模型，不参与 prompt。模型补充只往 profile 的 MiniMax 模型列表末尾追加条目。
 
 ## 已知限制
 
