@@ -1,6 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { apply, buildStatusPayload, runSync } from '../index.js'
+import { STATE_FILENAME } from '../lib/state.js'
 
 /**
  * A stand-in for the Host settings service.
@@ -42,10 +46,12 @@ function fakeSettings({ providers = {}, override } = {}) {
  */
 function ctxWith({ settings, profileDir = '/tmp/dsh-minimax-test', webServer } = {}) {
   const effects = []
+  const effectLabels = []
   const logs = []
   return {
     settings,
     effects,
+    effectLabels,
     logs,
     logger: {
       error(...args) {
@@ -59,9 +65,10 @@ function ctxWith({ settings, profileDir = '/tmp/dsh-minimax-test', webServer } =
       if (name === 'webServer') return webServer
       return undefined
     },
-    effect(setup) {
+    effect(setup, label) {
       const dispose = setup()
       effects.push(dispose)
+      effectLabels.push(label)
       return dispose
     },
   }
@@ -74,6 +81,22 @@ function ctxWith({ settings, profileDir = '/tmp/dsh-minimax-test', webServer } =
  */
 function disposeAll(ctx) {
   for (const dispose of ctx.effects.splice(0)) dispose()
+  ctx.effectLabels.splice(0)
+}
+
+/**
+ * Cancel one registered effect, by the label it was registered under.
+ *
+ * @param ctx - the fake context.
+ * @param label - the label the effect carries.
+ */
+function disposeEffect(ctx, label) {
+  const index = ctx.effectLabels.indexOf(label)
+  if (index === -1) return
+  const dispose = ctx.effects[index]
+  ctx.effects.splice(index, 1)
+  ctx.effectLabels.splice(index, 1)
+  dispose()
 }
 
 function makeContext(options = {}) {
@@ -145,6 +168,72 @@ const fakeFetch = async (url, init) => {
     return new Response(JSON.stringify({ data: MODEL_IDS.map((id) => ({ id })) }), { status: 200 })
   }
   return PROBE_FETCH(url, init)
+}
+
+/** A day, in milliseconds: the delay the daily sweep waits for. */
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Watch the timers the plugin arms.
+ *
+ * The daily sweep cannot be waited out in a test, so the clock is driven
+ * instead. The mock timers fire the sweep's timer, and the recorded timers
+ * show which delay was armed, how often the loop re-armed itself, and
+ * whether the timer holds the event loop open.
+ *
+ * @returns the recorded timers and a function that restores the original.
+ */
+function watchTimers() {
+  const originalSetTimeout = globalThis.setTimeout
+  const timers = []
+  globalThis.setTimeout = (handler, ms, ...rest) => {
+    const timer = originalSetTimeout(handler, ms, ...rest)
+    timers.push({ ms, timer })
+    return timer
+  }
+  return {
+    timers,
+    restore() {
+      globalThis.setTimeout = originalSetTimeout
+    },
+  }
+}
+
+/**
+ * The timers armed with the daily delay.
+ *
+ * @param watcher - the timer watcher.
+ * @returns the daily timers.
+ */
+function dailyTimers(watcher) {
+  return watcher.timers.filter((entry) => entry.ms === DAY_MS)
+}
+
+/**
+ * Let the pending work run for a few turns of the event loop.
+ *
+ * @param rounds - how many turns to wait.
+ */
+async function flush(rounds = 30) {
+  for (let round = 0; round < rounds; round += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+}
+
+/**
+ * Let the pending work run until the condition holds.
+ *
+ * A timer that comes due starts work that awaits promises and reads files,
+ * so it needs real turns of the event loop before it is finished.
+ *
+ * @param check - returns true once the work is done.
+ */
+async function waitUntil(check) {
+  for (let round = 0; round < 500; round += 1) {
+    if (check()) return
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  assert.fail('the pending work did not finish in time')
 }
 
 test('runSync appends a newly released model and leaves the rest alone', async () => {
@@ -556,3 +645,183 @@ test('the first sync is cancelled when the plugin is disposed', async (t) => {
     t.mock.timers.reset()
   }
 })
+
+test('the daily sweep is registered as an effect of its own', async () => {
+  const webServer = fakeWebServer()
+  const ctx = ctxWith({ settings: fakeSettings(), webServer })
+  try {
+    await apply(ctx, {})
+    // The startup attempt and the daily sweep are two separate effects, so
+    // unloading the plugin cancels both of them.
+    assert.deepEqual(ctx.effectLabels, [
+      'dsh-minimax-quota: routes',
+      'dsh-minimax-quota: first sync',
+      'dsh-minimax-quota: daily sync',
+    ])
+  } finally {
+    disposeAll(ctx)
+  }
+})
+
+test('the daily sweep runs one sync when the day elapses', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-daily-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  let modelLists = 0
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      modelLists += 1
+      return new Response(JSON.stringify({ data: MODEL_IDS.map((id) => ({ id })) }), { status: 200 })
+    }
+    return PROBE_FETCH(url, init)
+  }
+  try {
+    await apply(ctx, {})
+    // The startup attempt is called off, so the only sync that can run is
+    // the daily sweep.
+    disposeEffect(ctx, 'dsh-minimax-quota: first sync')
+
+    // The day has not passed yet, so nothing has run.
+    t.mock.timers.tick(DAY_MS - 1)
+    await flush()
+    assert.equal(modelLists, 0)
+    assert.equal(dailyTimers(watcher).length, 1)
+
+    // The day passes, and the sweep runs exactly one sync.
+    t.mock.timers.tick(1)
+    await waitUntil(() => dailyTimers(watcher).length === 2)
+    assert.equal(modelLists, 1)
+    assert.equal(settings.writes.length, 1)
+
+    // The next day brings exactly one more sync, and no more than that.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 3)
+    assert.equal(modelLists, 2)
+    // Nothing new was found, so the second sweep wrote nothing at all.
+    assert.equal(settings.writes.length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('a second sweep does not probe a model the plugin already added', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-steady-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  let modelLists = 0
+  const probed = []
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      modelLists += 1
+      return new Response(JSON.stringify({ data: [{ id: 'MiniMax-M3.1-Flash' }] }), { status: 200 })
+    }
+    probed.push(JSON.parse(init.body).model)
+    return PROBE_FETCH(url, init)
+  }
+  try {
+    await apply(ctx, {})
+    disposeEffect(ctx, 'dsh-minimax-quota: first sync')
+
+    // The first sweep measures the model MiniMax offers and adds it.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 2)
+    assert.equal(modelLists, 1)
+    // The cap request and the thinking request.
+    assert.deepEqual(probed, ['MiniMax-M3.1-Flash', 'MiniMax-M3.1-Flash'])
+    assert.equal(settings.writes.length, 1)
+    const written = settings.writes[0].next.providers['minimax-cn'].models
+    assert.deepEqual(written.map((entry) => entry.id), ['MiniMax-M3.1-Flash'])
+    // The plugin remembers what it added.
+    const state = JSON.parse(await readFile(join(profileDir, STATE_FILENAME), 'utf8'))
+    assert.deepEqual(state.addedModels, ['MiniMax-M3.1-Flash'])
+
+    // The second sweep costs one model-list request and no probe at all:
+    // the model the plugin added is not a candidate any more.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 3)
+    assert.equal(modelLists, 2)
+    assert.equal(probed.length, 2)
+    assert.equal(settings.writes.length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the daily sweep is cancelled when the plugin is disposed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-cancel-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  let modelLists = 0
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      modelLists += 1
+      return new Response(JSON.stringify({ data: MODEL_IDS.map((id) => ({ id })) }), { status: 200 })
+    }
+    return PROBE_FETCH(url, init)
+  }
+  try {
+    await apply(ctx, {})
+    // The plugin is unloaded before the sweep comes due, so the pending
+    // sweep must not run a sync that writes the profile afterwards.
+    disposeAll(ctx)
+    t.mock.timers.tick(DAY_MS)
+    await flush()
+    assert.equal(modelLists, 0)
+    assert.equal(settings.writes.length, 0)
+    // The cancelled sweep stops: it does not arm another day.
+    assert.equal(dailyTimers(watcher).length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the pending daily timer does not hold the process open', async () => {
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const ctx = ctxWith({ settings: fakeSettings(), webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [] }), { status: 200 })
+  try {
+    await apply(ctx, {})
+    const daily = dailyTimers(watcher)
+    assert.equal(daily.length, 1)
+    // The sweep's timer is unreferenced, so a pending sweep can never keep
+    // a process alive on its own.
+    assert.equal(daily[0].timer.hasRef(), false)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+  }
+})
+

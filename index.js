@@ -27,6 +27,9 @@ const STATUS_ROUTE = '/plugin/minimax/status'
 /** Route the Browser half posts to when the user asks for a sync. */
 const SYNC_ROUTE = '/plugin/minimax/sync'
 
+/** How long a day is, in milliseconds. */
+const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000
+
 /** The pi-ai settings namespace that holds the provider list. */
 const SETTINGS_NAMESPACE = 'llm-pi-ai'
 
@@ -316,6 +319,11 @@ export async function apply(ctx, config) {
   // writes the profile afterwards.
   const cancelFirstSync = scheduleSync(ctx, credentialRef)
   ctx.effect(() => cancelFirstSync, 'dsh-minimax-quota: first sync')
+
+  // The plugin also probes once a day, so a model MiniMax releases while the
+  // plugin is running still arrives without the user restarting anything.
+  const cancelDailySync = scheduleDailySync(ctx, credentialRef)
+  ctx.effect(() => cancelDailySync, 'dsh-minimax-quota: daily sync')
 }
 
 /**
@@ -371,6 +379,64 @@ function scheduleSync(ctx, credentialRef) {
   }
 
   void attempt()
+  return cancel
+}
+
+/**
+ * Probe once a day.
+ *
+ * The plugin probes the models MiniMax offers at startup, and then once a
+ * day, so a model MiniMax releases while the plugin is running still
+ * arrives without the user restarting anything. Only models that are
+ * neither listed by the user nor added by the plugin are probed, so a quiet
+ * day costs one model-list request and nothing else.
+ *
+ * @param ctx - Host context.
+ * @param credentialRef - credential reference to resolve.
+ * @returns a function that cancels the pending sweep.
+ */
+function scheduleDailySync(ctx, credentialRef) {
+  let timer = null
+  let wake = null
+  let cancelled = false
+
+  const wait = (ms) => new Promise((resolve) => {
+    wake = resolve
+    timer = setTimeout(() => {
+      timer = null
+      wake = null
+      resolve()
+    }, ms)
+    timer.unref?.()
+  })
+
+  const cancel = () => {
+    cancelled = true
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+    if (wake !== null) {
+      const resolve = wake
+      wake = null
+      resolve()
+    }
+  }
+
+  const sweep = async () => {
+    while (!cancelled) {
+      await wait(SYNC_INTERVAL_MS)
+      if (cancelled) return
+      try {
+        const result = await runSync(ctx, { credentialRef })
+        ctx.logger?.info?.('%s: %s', 'dsh-minimax-quota: the daily sync found', result.ok ? 'no new model' : result.reason)
+      } catch (error) {
+        reportFailure(ctx, 'the daily sync failed', error)
+      }
+    }
+  }
+
+  void sweep()
   return cancel
 }
 
