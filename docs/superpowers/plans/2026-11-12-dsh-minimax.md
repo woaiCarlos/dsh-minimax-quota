@@ -2008,6 +2008,18 @@ test('runSync appends a newly released model and leaves the rest alone', async (
   assert.equal(written[1].maxTokens, 524288)
 })
 
+test('runSync still succeeds when the state cannot be written', async () => {
+  const ctx = makeContext()
+  const result = await runSync(ctx, {
+    credentialRef: 'MINIMAX_CN_API_KEY',
+    profileDir: '/tmp/profile',
+    stateReader: async () => ({ addedModels: [], lastSyncAt: null }),
+    stateWriter: async () => { throw new Error('EACCES') },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(ctx.settings.writes.length, 1)
+})
+
 test('runSync never writes a retired model', async () => {
   const settings = fakeSettings([])
   const ctx = ctxWith({ settings })
@@ -2156,7 +2168,37 @@ function currentModels(descriptor) {
  * @param options - `{ credentialRef, profileDir, fetchImpl, stateReader, stateWriter, now }`.
  * @returns the sync outcome.
  */
+let inFlight = null
+
+/**
+ * Run one sync.
+ *
+ * One sync runs at a time. Two overlapping syncs would race on the profile
+ * write and on the state file, and the second would either lose the write
+ * or record a state that does not match the profile.
+ *
+ * @param ctx - Host context.
+ * @param options - the sync options.
+ * @returns the sync result.
+ */
 export async function runSync(ctx, options = {}) {
+  if (inFlight !== null) return inFlight
+  inFlight = runSyncOnce(ctx, options)
+  try {
+    return await inFlight
+  } finally {
+    inFlight = null
+  }
+}
+
+/**
+ * Do the work of one sync.
+ *
+ * @param ctx - Host context.
+ * @param options - the sync options.
+ * @returns the sync result.
+ */
+async function runSyncOnce(ctx, options = {}) {
   const credentialRef = options.credentialRef ?? DEFAULT_CREDENTIAL_REF
   const settings = ctx.get('settings')
   if (settings === undefined) return { ok: false, reason: 'missing-settings' }
@@ -2213,10 +2255,15 @@ export async function runSync(ctx, options = {}) {
   }), descriptor.revision, ['providers', PROVIDER_ROUTE, 'models'])
 
   const now = options.now ?? Date.now
-  await writeStateFn(profileDir, {
-    addedModels: [...state.addedModels, ...plan.addedIds],
-    lastSyncAt: now(),
-  })
+  try {
+    await writeStateFn(profileDir, {
+      addedModels: [...state.addedModels, ...plan.addedIds],
+      lastSyncAt: now(),
+    })
+  } catch {
+    // The models are already in the profile, so a failed bookkeeping write
+    // must not fail the sync. The next sync writes the state again.
+  }
   return { ok: true, added: plan.addedIds, models: plan.models }
 }
 
