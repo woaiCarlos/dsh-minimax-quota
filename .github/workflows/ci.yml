@@ -8,12 +8,20 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24', '26']
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          # The plugin runs on whichever Node the user's Harness ships, and
+          # the test runner's path handling changed between versions: the
+          # suite is run on every supported line so that difference can
+          # never reach a release unnoticed.
+          node-version: ${{ matrix.node }}
 
       - name: Run the test suite
         run: npm test
