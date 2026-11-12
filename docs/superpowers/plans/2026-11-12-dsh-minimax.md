@@ -390,7 +390,7 @@ In `package.json`, replace the `scripts` block:
 - [ ] **Step 9: Run the tests to verify they pass**
 
 Run: `npm test`
-Expected: PASS — 12 tests across `test/quota.test.js` and `test/credentials.test.js`, plus the two syntax checks.
+Expected: PASS — 13 tests across `test/quota.test.js` (9) and `test/credentials.test.js` (4), plus the two syntax checks.
 
 - [ ] **Step 10: Commit**
 
@@ -918,7 +918,7 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `node --test test/probe.test.js`
-Expected: PASS — 9 tests.
+Expected: PASS — 11 tests.
 
 - [ ] **Step 7: Commit**
 
