@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   OVER_LIMIT_MAX_TOKENS,
+  THINKING_SAMPLES,
   fetchModelIds,
   isRetired,
   parseMaxTokensLimit,
@@ -142,6 +143,57 @@ test('probeModel detects a model that does not think', async () => {
   const result = await probeModel('MiniMax-M2.7', 'sk-test', { fetchImpl })
   assert.equal(result.status, 'ok')
   assert.equal(result.supportsThinking, false)
+})
+
+test('probeModel asks again when one answer came without a thinking block', async () => {
+  let attempts = 0
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)' },
+      })
+    }
+    attempts += 1
+    // The first answer comes without a thinking block, the second with one.
+    if (attempts === 1) return jsonResponse({ content: [{ type: 'text', text: '391' }] }, 200)
+    return jsonResponse({ content: [{ type: 'thinking', thinking: '391' }, { type: 'text', text: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M2.7', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'ok')
+  assert.equal(result.supportsThinking, true)
+  assert.equal(attempts, 2)
+})
+
+test('probeModel counts a model that never thinks after every sample', async () => {
+  let attempts = 0
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)' },
+      })
+    }
+    attempts += 1
+    return jsonResponse({ content: [{ type: 'text', text: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M2.7', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'ok')
+  assert.equal(result.supportsThinking, false)
+  assert.equal(attempts, THINKING_SAMPLES)
+})
+
+test('probeModel reports a failed probe when the cap fails but the thinking request answers', async () => {
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({ error: { message: 'rate limited' } }, 429)
+    }
+    return jsonResponse({ content: [{ type: 'text', text: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M3', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.maxTokens, undefined)
 })
 
 test('probeModel reports a model that refuses the thinking field as not thinking', async () => {
