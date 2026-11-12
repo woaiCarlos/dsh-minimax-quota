@@ -237,6 +237,27 @@ test('every request carries a signal and the key travels only in a header', asyn
   assert.equal(String(seen[0].body ?? '').includes('sk-secret'), false)
 })
 
+test('the request that carries the key carries a signal and never returns it', async () => {
+  const seen = []
+  const fetchImpl = async (_url, init) => {
+    seen.push(init)
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M3] does not support max tokens > 524288 (2013)' },
+      })
+    }
+    return jsonResponse({ content: [{ type: 'thinking', thinking: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M3', 'sk-secret', { fetchImpl })
+  assert.equal(seen.length >= 1, true)
+  for (const request of seen) {
+    assert.ok(request.signal instanceof AbortSignal)
+    assert.equal(request.headers['x-api-key'], 'sk-secret')
+  }
+  assert.equal(JSON.stringify(result).includes('sk-secret'), false)
+})
+
 test('postMessage reports a network failure', async () => {
   const fetchImpl = async () => { throw new Error('fetch failed') }
   const result = await postMessage({ model: 'x' }, 'sk-test', { fetchImpl })
