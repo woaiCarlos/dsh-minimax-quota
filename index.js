@@ -33,6 +33,12 @@ const SETTINGS_NAMESPACE = 'llm-pi-ai'
 /** The provider route inside that namespace. */
 const PROVIDER_ROUTE = 'minimax-cn'
 
+/** How long the first sync waits before it tries again. */
+const FIRST_SYNC_DELAY_MS = 2000
+
+/** How many times the first sync tries before it gives up. */
+const FIRST_SYNC_ATTEMPTS = 5
+
 /**
  * Read the profile's current MiniMax model list.
  *
@@ -46,14 +52,48 @@ function readProviderDescriptor(settings) {
 }
 
 /**
+ * The provider routes the effective profile shows.
+ *
+ * The effective projection is the merged view of every layer, so a route the
+ * user configured in an inherited layer is visible here. The profile override
+ * on its own is not enough: the settings service strips the volatile fields
+ * from the override and merges the written value over it, so the `providers`
+ * map a write carries replaces the inherited one outright. A map built from
+ * the override alone would drop a route the user configured elsewhere,
+ * together with the credential environment that route needs.
+ *
+ * @param descriptor - the pi-ai namespace descriptor.
+ * @returns the provider routes.
+ */
+function providerRoutes(descriptor) {
+  const providers = descriptor?.value?.providers
+  return providers !== null && typeof providers === 'object' ? providers : {}
+}
+
+/**
  * The model entries the profile currently lists.
  *
  * @param descriptor - the pi-ai namespace descriptor.
  * @returns the listed entries.
  */
 function currentModels(descriptor) {
-  const models = descriptor?.value?.providers?.[PROVIDER_ROUTE]?.models
+  const models = providerRoutes(descriptor)[PROVIDER_ROUTE]?.models
   return Array.isArray(models) ? models : []
+}
+
+/**
+ * Report a failure where the operator can read it.
+ *
+ * The browser only ever receives a fixed reason, so an internal message goes
+ * to the Host log instead of into the page. A failure nobody anticipated must
+ * not be able to carry an internal detail into the browser.
+ *
+ * @param ctx - Host context.
+ * @param message - what failed.
+ * @param error - the failure.
+ */
+function reportFailure(ctx, message, error) {
+  ctx.logger?.error?.('%s: %s', message, error)
 }
 
 /** The sync that is running right now, so a second caller waits for it. */
@@ -137,12 +177,18 @@ async function runSyncOnce(ctx, options = {}) {
     return { ok: true, added: [], models: listed }
   }
 
+  // The written map is the effective one, because the settings service
+  // replaces the whole `providers` map: a route the user configured in an
+  // inherited layer is only visible in the effective projection, and a map
+  // built from the profile override alone would drop that route and the
+  // credential environment it needs.
+  const routes = providerRoutes(descriptor)
   await settings.write(SETTINGS_NAMESPACE, (current) => ({
     ...current,
     providers: {
-      ...current.providers,
+      ...routes,
       [PROVIDER_ROUTE]: {
-        ...current.providers?.[PROVIDER_ROUTE],
+        ...routes[PROVIDER_ROUTE],
         models: plan.models,
       },
     },
@@ -229,8 +275,11 @@ export async function apply(ctx, config) {
         } catch (error) {
           // The route answers every sixty seconds; an unwritten response would
           // leave the browser's request pending forever and stop its polling.
+          // The browser only learns that the request failed: the message
+          // belongs on the Host side, where the operator can read it.
+          reportFailure(ctx, 'dsh-minimax-quota: the status route failed', error)
           send(res, {
-            quota: { ok: false, reason: 'request-failed', message: error instanceof Error ? error.message : String(error) },
+            quota: { ok: false, reason: 'request-failed' },
             models: { synced: [], added: [], syncedAt: null },
           })
         }
@@ -251,7 +300,10 @@ export async function apply(ctx, config) {
         try {
           send(res, await runSync(ctx, { credentialRef, signal: abort.signal }))
         } catch (error) {
-          send(res, { ok: false, reason: 'sync-failed', message: error instanceof Error ? error.message : String(error) })
+          // The browser only ever receives a fixed reason, so a failure nobody
+          // anticipated cannot carry an internal message into the page.
+          reportFailure(ctx, 'dsh-minimax-quota: the sync route failed', error)
+          send(res, { ok: false, reason: 'sync-failed' })
         }
       },
     }),
@@ -259,27 +311,67 @@ export async function apply(ctx, config) {
   ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax-quota: routes')
 
   // The profile may still be loading, so the first sync waits for the pi-ai
-  // namespace to appear before it gives up.
-  void scheduleSync(ctx, credentialRef)
+  // namespace to appear before it gives up. The pending attempt is called off
+  // with the plugin, so a plugin that is unloaded inside that window never
+  // writes the profile afterwards.
+  const cancelFirstSync = scheduleSync(ctx, credentialRef)
+  ctx.effect(() => cancelFirstSync, 'dsh-minimax-quota: first sync')
 }
 
 /**
  * Run the first sync once the profile has settled.
  *
+ * The wait is a timer, so the plugin has to be able to call it off: a
+ * plugin that is unloaded while the attempt is pending must not write the
+ * profile afterwards.
+ *
  * @param ctx - Host context.
  * @param credentialRef - credential reference to resolve.
+ * @returns a function that cancels the pending attempt.
  */
-async function scheduleSync(ctx, credentialRef) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 2000))
-    try {
-      const result = await runSync(ctx, { credentialRef })
-      if (result.ok || result.reason === 'missing-credential') return
-    } catch {
-      // A failed sync must never take the plugin down; the next attempt
-      // tries again.
+function scheduleSync(ctx, credentialRef) {
+  let timer = null
+  let wake = null
+  let cancelled = false
+
+  const wait = (ms) => new Promise((resolve) => {
+    wake = resolve
+    timer = setTimeout(() => {
+      timer = null
+      wake = null
+      resolve()
+    }, ms)
+  })
+
+  const cancel = () => {
+    cancelled = true
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+    if (wake !== null) {
+      const resolve = wake
+      wake = null
+      resolve()
     }
   }
+
+  const attempt = async () => {
+    for (let round = 0; round < FIRST_SYNC_ATTEMPTS; round += 1) {
+      await wait(FIRST_SYNC_DELAY_MS)
+      if (cancelled) return
+      try {
+        const result = await runSync(ctx, { credentialRef })
+        if (result.ok || result.reason === 'missing-credential') return
+      } catch {
+        // A failed sync must never take the plugin down; the next attempt
+        // tries again.
+      }
+    }
+  }
+
+  void attempt()
+  return cancel
 }
 
 /**
