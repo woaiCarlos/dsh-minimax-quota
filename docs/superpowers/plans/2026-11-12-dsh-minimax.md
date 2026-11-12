@@ -42,7 +42,7 @@
 
 ---
 
-Task 1: Test harness and the extracted quota module
+## Task 1: Test harness and the extracted quota module
 
 The bundle has no test runner yet (`npm test` only syntax-checks). This task establishes `node --test` and moves the quota logic into its own module so it can be tested. `node:test` is built into Node ≥ 20, so the bundle still ships with zero dependencies.
 
@@ -405,7 +405,7 @@ zero runtime dependencies."
 
 ---
 
-Task 2: The built-in model specification snapshot
+## Task 2: The built-in model specification snapshot
 
 `lib/specs.js` holds the two parameters MiniMax's API does not serve (context window, input modalities) plus the reasoning options that state which models expose effort levels. The values come from models.dev's `minimax-cn` provider, cross-checked against the live API on 2026-11-12.
 
@@ -678,7 +678,7 @@ boundary where the live API starts refusing oversized requests."
 
 ---
 
-Task 3: Probing MiniMax for liveness, output cap and thinking
+## Task 3: Probing MiniMax for liveness, output cap and thinking
 
 This is the module that turns the user's suspicion — "some models support thinking, some do not" — into a measurement. Three facts drive its shape:
 
@@ -1023,7 +1023,7 @@ nothing to think about."
 
 ---
 
-Task 4: Turning a probe result into a pi-ai model entry
+## Task 4: Turning a probe result into a pi-ai model entry
 
 **Files:**
 - Create: `lib/model-entry.js`
@@ -1211,7 +1211,7 @@ throw. Only a model that needs adaptive thinking carries it."
 
 ---
 
-Task 5: The append-only merge
+## Task 5: The append-only merge
 
 This module holds the promise that the plugin never overwrites and never removes. It is pure, so the promise is testable without a Host.
 
@@ -1395,7 +1395,7 @@ because the ids the plugin added are remembered."
 
 ---
 
-Task 6: Remembering which models the plugin added
+## Task 6: Remembering which models the plugin added
 
 Without this, a model the user deletes by hand comes back on the next sync. The state lives in one file inside the profile directory, so the plugin's own bookkeeping never touches the user's patch.
 
@@ -1569,7 +1569,7 @@ bookkeeping never lands in the user's profile patch."
 
 ---
 
-Task 7: The Host wiring
+## Task 7: The Host wiring
 
 Now the modules meet a live context. This task registers the routes, runs the sync, and writes the result into the pi-ai profile.
 
@@ -2056,7 +2056,7 @@ A failed sync never takes the plugin down."
 
 ---
 
-Task 8: The Browser half — models section and notice marker
+## Task 8: The Browser half — models section and notice marker
 
 **Files:**
 - Modify: `client.js`
@@ -2209,7 +2209,7 @@ details panel lists the models the profile currently holds."
 
 ---
 
-Task 9: Rename the bundle to `dsh-minimax`
+## Task 9: Rename the bundle to `dsh-minimax`
 
 The package name changes so the bundle can carry both jobs. The GitHub repository URL does not change, so the community catalog pull request stays valid.
 
@@ -2360,7 +2360,7 @@ which keeps the community catalog entry and its pull request valid."
 
 ---
 
-Task 10: End-to-end verification
+## Task 10: End-to-end verification
 
 The unit tests cover the logic. This task proves the plugin works inside a real Harness instance, against the real MiniMax API, with a real profile.
 
