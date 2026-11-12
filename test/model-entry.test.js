@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildModelEntry } from '../lib/model-entry.js'
+import { FALLBACK_EFFORT_LEVELS, buildModelEntry } from '../lib/model-entry.js'
 import { lookupSpec } from '../lib/specs.js'
 
 test('a thinking model declares the effort levels and adaptive thinking', () => {
@@ -19,7 +19,7 @@ test('a thinking model declares the effort levels and adaptive thinking', () => 
 test('a thinking model without adaptive efforts omits the compat block', () => {
   const entry = buildModelEntry('MiniMax-M3', { maxTokens: 524288, supportsThinking: true })
   assert.deepEqual(entry.reasoningEfforts, {
-    low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
+    low: 'low', medium: 'medium', high: 'high',
   })
   assert.equal('compat' in entry, false)
 })
@@ -42,6 +42,42 @@ test('an entry only carries modalities pi-ai accepts', () => {
     reasoningOptions: null,
   })
   assert.deepEqual(entry.input, ['text', 'image'])
+})
+
+test('a budget-mode model offers only the levels budget mode can tell apart', () => {
+  const entry = buildModelEntry('MiniMax-M3', { maxTokens: 524288, supportsThinking: true }, {
+    contextWindow: 1000000,
+    outputLimit: 524288,
+    modalities: ['text', 'image'],
+    reasoningOptions: { type: 'toggle' },
+  })
+  assert.deepEqual(Object.keys(entry.reasoningEfforts), ['low', 'medium', 'high'])
+  assert.equal(entry.compat, undefined)
+})
+
+test('an adaptive model keeps the levels its snapshot records', () => {
+  const entry = buildModelEntry('MiniMax-M3.1-Flash', { maxTokens: 524288, supportsThinking: true }, {
+    contextWindow: 1000000,
+    outputLimit: 524288,
+    modalities: ['text', 'image'],
+    reasoningOptions: { type: 'effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  })
+  assert.deepEqual(Object.keys(entry.reasoningEfforts), ['low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(entry.compat, { forceAdaptiveThinking: true })
+})
+
+test('a degenerate measured cap falls back to the snapshot', () => {
+  const entry = buildModelEntry('MiniMax-M3', { maxTokens: 0, supportsThinking: false }, {
+    contextWindow: 1000000,
+    outputLimit: 524288,
+    modalities: ['text', 'image'],
+    reasoningOptions: { type: 'toggle' },
+  })
+  assert.equal(entry.maxTokens, 524288)
+})
+
+test('the fallback levels are the ones budget mode distinguishes', () => {
+  assert.deepEqual(FALLBACK_EFFORT_LEVELS, ['low', 'medium', 'high'])
 })
 
 test('a model that does not think turns reasoning off', () => {
