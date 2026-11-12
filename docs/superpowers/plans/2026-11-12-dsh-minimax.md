@@ -42,7 +42,7 @@
 
 ---
 
-## Task 1: Test harness and the extracted quota module
+Task 1: Test harness and the extracted quota module
 
 The bundle has no test runner yet (`npm test` only syntax-checks). This task establishes `node --test` and moves the quota logic into its own module so it can be tested. `node:test` is built into Node ≥ 20, so the bundle still ships with zero dependencies.
 
@@ -405,7 +405,7 @@ zero runtime dependencies."
 
 ---
 
-## Task 2: The built-in model specification snapshot
+Task 2: The built-in model specification snapshot
 
 `lib/specs.js` holds the two parameters MiniMax's API does not serve (context window, input modalities) plus the reasoning options that state which models expose effort levels. The values come from models.dev's `minimax-cn` provider, cross-checked against the live API on 2026-11-12.
 
@@ -640,10 +640,29 @@ export function lookupSpec(modelId) {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 4: Freeze the modality list this task now depends on**
+
+This task is the first production consumer of `lib/specs.js`, and it filters an entry's
+modalities through `SUPPORTED_MODALITIES` — the exported list that decides what an entry
+may carry. A mutable export gating a production filter is the same hazard the Task 2
+review found in the snapshot itself, so freeze it:
+
+```js
+export const SUPPORTED_MODALITIES = Object.freeze(['text', 'image'])
+```
+
+Add a case to `test/specs.test.js`:
+
+```js
+test('the modality list cannot be mutated', () => {
+  assert.throws(() => SUPPORTED_MODALITIES.push('video'), TypeError)
+})
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
 
 Run: `node --test test/specs.test.js`
-Expected: PASS — 12 tests.
+Expected: PASS — 13 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -659,7 +678,7 @@ boundary where the live API starts refusing oversized requests."
 
 ---
 
-## Task 3: Probing MiniMax for liveness, output cap and thinking
+Task 3: Probing MiniMax for liveness, output cap and thinking
 
 This is the module that turns the user's suspicion — "some models support thinking, some do not" — into a measurement. Three facts drive its shape:
 
@@ -984,7 +1003,7 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `node --test test/probe.test.js`
-Expected: PASS — 11 tests.
+Expected: PASS — 10 tests.
 
 - [ ] **Step 7: Commit**
 
@@ -1004,7 +1023,7 @@ nothing to think about."
 
 ---
 
-## Task 4: Turning a probe result into a pi-ai model entry
+Task 4: Turning a probe result into a pi-ai model entry
 
 **Files:**
 - Create: `lib/model-entry.js`
@@ -1055,6 +1074,16 @@ test('a model that records its own effort levels uses those', () => {
   assert.deepEqual(entry.reasoningEfforts, { low: 'low', high: 'high' })
 })
 
+test('an entry only carries modalities pi-ai accepts', () => {
+  const entry = buildModelEntry('MiniMax-M9-Ultra', { maxTokens: 4096, supportsThinking: false }, {
+    contextWindow: 1000000,
+    outputLimit: 131072,
+    modalities: ['text', 'image', 'video'],
+    reasoningOptions: null,
+  })
+  assert.deepEqual(entry.input, ['text', 'image'])
+})
+
 test('a model that does not think turns reasoning off', () => {
   const entry = buildModelEntry('MiniMax-M2.7', { maxTokens: 196608, supportsThinking: false })
   assert.equal(entry.reasoningEfforts, false)
@@ -1097,7 +1126,7 @@ Expected: FAIL with `Cannot find module '../lib/model-entry.js'`
  * Turning a probe result into one pi-ai model entry.
  */
 
-import { lookupSpec } from './specs.js'
+import { SUPPORTED_MODALITIES, lookupSpec } from './specs.js'
 
 /**
  * The effort levels offered for a model the snapshot says nothing about.
@@ -1130,7 +1159,7 @@ export function buildModelEntry(modelId, probe, spec = lookupSpec(modelId)) {
     name: modelId,
     contextWindow: spec.contextWindow,
     maxTokens: probe.maxTokens ?? spec.outputLimit,
-    input: [...spec.modalities],
+    input: spec.modalities.filter((modality) => SUPPORTED_MODALITIES.includes(modality)),
   }
   if (probe.supportsThinking === true) {
     const levels = spec.reasoningOptions?.values ?? FALLBACK_EFFORT_LEVELS
@@ -1145,15 +1174,34 @@ export function buildModelEntry(modelId, probe, spec = lookupSpec(modelId)) {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 4: Freeze the modality list this task now depends on**
+
+This task is the first production consumer of `lib/specs.js`, and it filters an entry's
+modalities through `SUPPORTED_MODALITIES` — the exported list that decides what an entry
+may carry. A mutable export gating a production filter is the same hazard the Task 2
+review found in the snapshot itself, so freeze it:
+
+```js
+export const SUPPORTED_MODALITIES = Object.freeze(['text', 'image'])
+```
+
+Add a case to `test/specs.test.js`:
+
+```js
+test('the modality list cannot be mutated', () => {
+  assert.throws(() => SUPPORTED_MODALITIES.push('video'), TypeError)
+})
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
 
 Run: `node --test test/model-entry.test.js`
-Expected: PASS — 8 tests.
+Expected: PASS — 10 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add lib/model-entry.js test/model-entry.test.js
+git add lib/model-entry.js test/model-entry.test.js lib/specs.js test/specs.test.js
 git commit -m "feat: build pi-ai model entries from a probe result
 
 The compat block is omitted entirely rather than set to undefined:
@@ -1163,7 +1211,7 @@ throw. Only a model that needs adaptive thinking carries it."
 
 ---
 
-## Task 5: The append-only merge
+Task 5: The append-only merge
 
 This module holds the promise that the plugin never overwrites and never removes. It is pure, so the promise is testable without a Host.
 
@@ -1310,10 +1358,29 @@ export function planAppend({ currentModels = [], addedModels = [], candidateIds 
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 4: Freeze the modality list this task now depends on**
+
+This task is the first production consumer of `lib/specs.js`, and it filters an entry's
+modalities through `SUPPORTED_MODALITIES` — the exported list that decides what an entry
+may carry. A mutable export gating a production filter is the same hazard the Task 2
+review found in the snapshot itself, so freeze it:
+
+```js
+export const SUPPORTED_MODALITIES = Object.freeze(['text', 'image'])
+```
+
+Add a case to `test/specs.test.js`:
+
+```js
+test('the modality list cannot be mutated', () => {
+  assert.throws(() => SUPPORTED_MODALITIES.push('video'), TypeError)
+})
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
 
 Run: `node --test test/merge.test.js`
-Expected: PASS — 6 tests.
+Expected: PASS — 7 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1328,7 +1395,7 @@ because the ids the plugin added are remembered."
 
 ---
 
-## Task 6: Remembering which models the plugin added
+Task 6: Remembering which models the plugin added
 
 Without this, a model the user deletes by hand comes back on the next sync. The state lives in one file inside the profile directory, so the plugin's own bookkeeping never touches the user's patch.
 
@@ -1465,10 +1532,29 @@ export async function writeState(dir, state) {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 4: Freeze the modality list this task now depends on**
+
+This task is the first production consumer of `lib/specs.js`, and it filters an entry's
+modalities through `SUPPORTED_MODALITIES` — the exported list that decides what an entry
+may carry. A mutable export gating a production filter is the same hazard the Task 2
+review found in the snapshot itself, so freeze it:
+
+```js
+export const SUPPORTED_MODALITIES = Object.freeze(['text', 'image'])
+```
+
+Add a case to `test/specs.test.js`:
+
+```js
+test('the modality list cannot be mutated', () => {
+  assert.throws(() => SUPPORTED_MODALITIES.push('video'), TypeError)
+})
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
 
 Run: `node --test test/state.test.js`
-Expected: PASS — 5 tests.
+Expected: PASS — 6 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1483,7 +1569,7 @@ bookkeeping never lands in the user's profile patch."
 
 ---
 
-## Task 7: The Host wiring
+Task 7: The Host wiring
 
 Now the modules meet a live context. This task registers the routes, runs the sync, and writes the result into the pi-ai profile.
 
@@ -1970,7 +2056,7 @@ A failed sync never takes the plugin down."
 
 ---
 
-## Task 8: The Browser half — models section and notice marker
+Task 8: The Browser half — models section and notice marker
 
 **Files:**
 - Modify: `client.js`
@@ -2123,7 +2209,7 @@ details panel lists the models the profile currently holds."
 
 ---
 
-## Task 9: Rename the bundle to `dsh-minimax`
+Task 9: Rename the bundle to `dsh-minimax`
 
 The package name changes so the bundle can carry both jobs. The GitHub repository URL does not change, so the community catalog pull request stays valid.
 
@@ -2274,7 +2360,7 @@ which keeps the community catalog entry and its pull request valid."
 
 ---
 
-## Task 10: End-to-end verification
+Task 10: End-to-end verification
 
 The unit tests cover the logic. This task proves the plugin works inside a real Harness instance, against the real MiniMax API, with a real profile.
 
