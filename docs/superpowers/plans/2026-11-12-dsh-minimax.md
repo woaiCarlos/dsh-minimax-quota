@@ -680,12 +680,6 @@ boundary where the live API starts refusing oversized requests."
 
 ## Task 3: Probing MiniMax for liveness, output cap and thinking
 
-This is the module that turns the user's suspicion — "some models support thinking, some do not" — into a measurement. Three facts drive its shape:
-
-- `GET /v1/models` lists retired models, so the list is a candidate set, not an answer.
-- The exact output cap is in the refusal message of an over-limit request, and that request is rejected before generation, so it costs nothing.
-- Whether a model thinks can only be told by a request that makes it think. A prompt like `"hi"` produces a **false negative** for every model, because there is nothing to think about; the prompt has to demand reasoning.
-
 **Files:**
 - Create: `lib/probe.js`
 - Create: `test/probe.test.js`
@@ -699,14 +693,15 @@ This is the module that turns the user's suspicion — "some models support thin
     - `OVER_LIMIT_MAX_TOKENS: number`
     - `THINKING_PROMPT: string`
     - `PROBE_TIMEOUT_MS: number`
+    - `THINKING_SAMPLES: number`
     - `parseMaxTokensLimit(message): number | undefined`
     - `isRetired(message): boolean`
     - `postMessage(body, apiKey, options): Promise<{ status: number, payload: object | undefined, message: string }>`
-    - `fetchModelIds(apiKey, options): Promise<string[]>`
+    - `fetchModelIds(apiKey, options): Promise<string[] | null>`
     - `probeModel(modelId, apiKey, options): Promise<{ status: 'ok' | 'retired' | 'failed', modelId: string, maxTokens?: number, supportsThinking?: boolean, reason?: string }>`
   - `options` is `{ signal?: AbortSignal, fetchImpl?: typeof fetch }`
 
-- [ ] **Step 1: Write the failing test for the refusal parsers**
+- [ ] **Step 1: Write the failing test**
 
 Create `test/probe.test.js`:
 
@@ -715,6 +710,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   OVER_LIMIT_MAX_TOKENS,
+  THINKING_SAMPLES,
   fetchModelIds,
   isRetired,
   parseMaxTokensLimit,
@@ -857,6 +853,57 @@ test('probeModel detects a model that does not think', async () => {
   assert.equal(result.supportsThinking, false)
 })
 
+test('probeModel asks again when one answer came without a thinking block', async () => {
+  let attempts = 0
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)' },
+      })
+    }
+    attempts += 1
+    // The first answer comes without a thinking block, the second with one.
+    if (attempts === 1) return jsonResponse({ content: [{ type: 'text', text: '391' }] }, 200)
+    return jsonResponse({ content: [{ type: 'thinking', thinking: '391' }, { type: 'text', text: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M2.7', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'ok')
+  assert.equal(result.supportsThinking, true)
+  assert.equal(attempts, 2)
+})
+
+test('probeModel counts a model that never thinks after every sample', async () => {
+  let attempts = 0
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)' },
+      })
+    }
+    attempts += 1
+    return jsonResponse({ content: [{ type: 'text', text: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M2.7', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'ok')
+  assert.equal(result.supportsThinking, false)
+  assert.equal(attempts, THINKING_SAMPLES)
+})
+
+test('probeModel reports a failed probe when the cap fails but the thinking request answers', async () => {
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({ error: { message: 'rate limited' } }, 429)
+    }
+    return jsonResponse({ content: [{ type: 'text', text: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M3', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.maxTokens, undefined)
+})
+
 test('probeModel reports a model that refuses the thinking field as not thinking', async () => {
   const bodies = []
   const fetchImpl = async (_url, init) => {
@@ -922,416 +969,12 @@ test('postMessage reports an empty message when the payload carries no error', a
 })
 ```
 
-- [ ] **Step 2: Write the failing test for the model list**
-
-Append to `test/probe.test.js`:
-
-```js
-/**
- * Talking to MiniMax about the models its account can use.
- *
- * Four facts shape this module.
- *
- * `GET /v1/models` lists models the account can no longer call, so the list
- * is a candidate set and every candidate still has to be probed.
- *
- * The exact output cap is written into the refusal of an over-limit
- * request, and that request is rejected before generation, so reading the
- * cap costs nothing.
- *
- * Whether a model thinks can only be told by a request that makes it think.
- * A prompt like "hi" yields a false negative for every model, because there
- * is nothing to think about; the prompt has to demand reasoning.
- *
- * MiniMax validates `max_tokens` before it checks whether the model still
- * exists, so a retired model answers the cap request with a cap and only
- * says it is gone on the next request.
- */
-
-/** Anthropic-compatible messages endpoint. */
-export const MESSAGES_URL = 'https://api.minimaxi.com/anthropic/v1/messages'
-
-/** OpenAI-compatible model list endpoint. */
-export const MODELS_URL = 'https://api.minimaxi.com/v1/models'
-
-/** A max_tokens value no MiniMax model accepts, used to elicit the cap. */
-export const OVER_LIMIT_MAX_TOKENS = 999_999_999
-
-/** A prompt that reliably makes a reasoning model produce a thinking block. */
-export const THINKING_PROMPT = 'What is 17*23? Think it through.'
-
-/** How long one probe request may take. */
-export const PROBE_TIMEOUT_MS = 20_000
-
-/**
- * Read the output cap out of a refusal message.
- *
- * @param message - the error message the endpoint answered with.
- * @returns the cap, or undefined when the message carries none.
- */
-export function parseMaxTokensLimit(message) {
-  const match = /does not support max tokens > (\d+)/.exec(message)
-  return match === null ? undefined : Number(match[1])
-}
-
-/**
- * Recognize the refusal that marks a retired model.
- *
- * @param message - the error message the endpoint answered with.
- * @returns true when the model is no longer available.
- */
-export function isRetired(message) {
-  return /no longer available/i.test(message)
-}
-
-/**
- * Send one request to the Anthropic-compatible endpoint.
- *
- * @param body - the request body.
- * @param apiKey - the MiniMax secret.
- * @param options - `{ signal, fetchImpl }`.
- * @returns the status, the parsed payload when there is one, and the message.
- */
-export async function postMessage(body, apiKey, { signal, fetchImpl = fetch } = {}) {
-  const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
-  const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
-  let response
-  try {
-    response = await fetchImpl(MESSAGES_URL, {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        accept: 'application/json',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: composed,
-    })
-  } catch (error) {
-    return { status: 0, payload: undefined, message: error instanceof Error ? error.message : String(error) }
-  }
-  let payload
-  try {
-    payload = await response.json()
-  } catch {
-    return { status: response.status, payload: undefined, message: `HTTP ${response.status}` }
-  }
-  return {
-    status: response.status,
-    payload,
-    message: typeof payload?.error?.message === 'string' ? payload.error.message : '',
-  }
-}
-
-/**
- * List the model ids MiniMax reports for this account.
- *
- * The list carries retired models as well, so every id still has to be
- * probed before it may be written into the profile.
- *
- * @param apiKey - the MiniMax secret.
- * @param options - `{ signal, fetchImpl }`.
- * @returns the candidate model ids, or null when the list could not be read.
- */
-export async function fetchModelIds(apiKey, { signal, fetchImpl = fetch } = {}) {
-  const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
-  const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
-  let response
-  try {
-    response = await fetchImpl(MODELS_URL, {
-      method: 'GET',
-      headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
-      signal: composed,
-    })
-  } catch {
-    // A failed read is not an empty account, and the caller has to be able to
-    // tell the two apart.
-    return null
-  }
-  let body
-  try {
-    body = await response.json()
-  } catch {
-    return null
-  }
-  if (!Array.isArray(body?.data)) return null
-  const data = body.data
-  return data.map((entry) => entry?.id).filter((id) => typeof id === 'string' && id.length > 0)
-}
-
-/**
- * Probe one model for liveness, output cap and thinking.
- *
- * @param modelId - the model to probe.
- * @param apiKey - the MiniMax secret.
- * @param options - `{ signal, fetchImpl }`.
- * @returns the probe outcome.
- */
-export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } = {}) {
-  const cap = await postMessage({
-    model: modelId,
-    max_tokens: OVER_LIMIT_MAX_TOKENS,
-    messages: [{ role: 'user', content: 'hi' }],
-  }, apiKey, { signal, fetchImpl })
-  const capMessage = cap.message
-  if (isRetired(capMessage)) return { status: 'retired', modelId }
-  const maxTokens = parseMaxTokensLimit(capMessage)
-  if (maxTokens === undefined) {
-    // The cap request did not answer with a cap, so the measurement failed.
-    // Reporting this as ok would record the model as healthy with an unknown
-    // cap, which is the opposite of what was measured.
-    return { status: 'failed', modelId, reason: capMessage || `HTTP ${cap.status}` }
-  }
-
-  const thinkingTokens = Math.min(8192, maxTokens)
-  const thinking = await postMessage({
-    model: modelId,
-    max_tokens: thinkingTokens,
-    messages: [{ role: 'user', content: THINKING_PROMPT }],
-    thinking: { type: 'enabled', budget_tokens: 4096 },
-  }, apiKey, { signal, fetchImpl })
-  const thinkingMessage = thinking.message
-  // MiniMax validates `max_tokens` before it checks whether the model still
-  // exists, so a retired model answers the cap request with a cap and only
-  // says it is gone on this request.
-  if (isRetired(thinkingMessage)) return { status: 'retired', modelId }
-  const blocks = Array.isArray(thinking.payload?.content) ? thinking.payload.content : undefined
-  if (blocks === undefined) {
-    if (!/thinking/i.test(thinkingMessage)) {
-      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
-    }
-    // The endpoint refused the `thinking` field, which means this model does
-    // not think. Ask again without it: an answer then is a measurement rather
-    // than a failure.
-    const plain = await postMessage({
-      model: modelId,
-      max_tokens: thinkingTokens,
-      messages: [{ role: 'user', content: THINKING_PROMPT }],
-    }, apiKey, { signal, fetchImpl })
-    const plainBlocks = Array.isArray(plain.payload?.content) ? plain.payload.content : undefined
-    if (plainBlocks === undefined) {
-      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
-    }
-    return { status: 'ok', modelId, maxTokens, supportsThinking: false }
-  }
-  return {
-    status: 'ok',
-    modelId,
-    maxTokens,
-    supportsThinking: blocks.some((block) => block?.type === 'thinking'),
-  }
-}
-```
-
-- [ ] **Step 3: Write the failing test for the probe**
-
-Append to `test/probe.test.js`:
-
-```js
-/**
- * Talking to MiniMax about the models its account can use.
- *
- * Four facts shape this module.
- *
- * `GET /v1/models` lists models the account can no longer call, so the list
- * is a candidate set and every candidate still has to be probed.
- *
- * The exact output cap is written into the refusal of an over-limit
- * request, and that request is rejected before generation, so reading the
- * cap costs nothing.
- *
- * Whether a model thinks can only be told by a request that makes it think.
- * A prompt like "hi" yields a false negative for every model, because there
- * is nothing to think about; the prompt has to demand reasoning.
- *
- * MiniMax validates `max_tokens` before it checks whether the model still
- * exists, so a retired model answers the cap request with a cap and only
- * says it is gone on the next request.
- */
-
-/** Anthropic-compatible messages endpoint. */
-export const MESSAGES_URL = 'https://api.minimaxi.com/anthropic/v1/messages'
-
-/** OpenAI-compatible model list endpoint. */
-export const MODELS_URL = 'https://api.minimaxi.com/v1/models'
-
-/** A max_tokens value no MiniMax model accepts, used to elicit the cap. */
-export const OVER_LIMIT_MAX_TOKENS = 999_999_999
-
-/** A prompt that reliably makes a reasoning model produce a thinking block. */
-export const THINKING_PROMPT = 'What is 17*23? Think it through.'
-
-/** How long one probe request may take. */
-export const PROBE_TIMEOUT_MS = 20_000
-
-/**
- * Read the output cap out of a refusal message.
- *
- * @param message - the error message the endpoint answered with.
- * @returns the cap, or undefined when the message carries none.
- */
-export function parseMaxTokensLimit(message) {
-  const match = /does not support max tokens > (\d+)/.exec(message)
-  return match === null ? undefined : Number(match[1])
-}
-
-/**
- * Recognize the refusal that marks a retired model.
- *
- * @param message - the error message the endpoint answered with.
- * @returns true when the model is no longer available.
- */
-export function isRetired(message) {
-  return /no longer available/i.test(message)
-}
-
-/**
- * Send one request to the Anthropic-compatible endpoint.
- *
- * @param body - the request body.
- * @param apiKey - the MiniMax secret.
- * @param options - `{ signal, fetchImpl }`.
- * @returns the status, the parsed payload when there is one, and the message.
- */
-export async function postMessage(body, apiKey, { signal, fetchImpl = fetch } = {}) {
-  const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
-  const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
-  let response
-  try {
-    response = await fetchImpl(MESSAGES_URL, {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        accept: 'application/json',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: composed,
-    })
-  } catch (error) {
-    return { status: 0, payload: undefined, message: error instanceof Error ? error.message : String(error) }
-  }
-  let payload
-  try {
-    payload = await response.json()
-  } catch {
-    return { status: response.status, payload: undefined, message: `HTTP ${response.status}` }
-  }
-  return {
-    status: response.status,
-    payload,
-    message: typeof payload?.error?.message === 'string' ? payload.error.message : '',
-  }
-}
-
-/**
- * List the model ids MiniMax reports for this account.
- *
- * The list carries retired models as well, so every id still has to be
- * probed before it may be written into the profile.
- *
- * @param apiKey - the MiniMax secret.
- * @param options - `{ signal, fetchImpl }`.
- * @returns the candidate model ids, or null when the list could not be read.
- */
-export async function fetchModelIds(apiKey, { signal, fetchImpl = fetch } = {}) {
-  const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
-  const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
-  let response
-  try {
-    response = await fetchImpl(MODELS_URL, {
-      method: 'GET',
-      headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
-      signal: composed,
-    })
-  } catch {
-    // A failed read is not an empty account, and the caller has to be able to
-    // tell the two apart.
-    return null
-  }
-  let body
-  try {
-    body = await response.json()
-  } catch {
-    return null
-  }
-  if (!Array.isArray(body?.data)) return null
-  const data = body.data
-  return data.map((entry) => entry?.id).filter((id) => typeof id === 'string' && id.length > 0)
-}
-
-/**
- * Probe one model for liveness, output cap and thinking.
- *
- * @param modelId - the model to probe.
- * @param apiKey - the MiniMax secret.
- * @param options - `{ signal, fetchImpl }`.
- * @returns the probe outcome.
- */
-export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } = {}) {
-  const cap = await postMessage({
-    model: modelId,
-    max_tokens: OVER_LIMIT_MAX_TOKENS,
-    messages: [{ role: 'user', content: 'hi' }],
-  }, apiKey, { signal, fetchImpl })
-  const capMessage = cap.message
-  if (isRetired(capMessage)) return { status: 'retired', modelId }
-  const maxTokens = parseMaxTokensLimit(capMessage)
-  if (maxTokens === undefined) {
-    // The cap request did not answer with a cap, so the measurement failed.
-    // Reporting this as ok would record the model as healthy with an unknown
-    // cap, which is the opposite of what was measured.
-    return { status: 'failed', modelId, reason: capMessage || `HTTP ${cap.status}` }
-  }
-
-  const thinkingTokens = Math.min(8192, maxTokens)
-  const thinking = await postMessage({
-    model: modelId,
-    max_tokens: thinkingTokens,
-    messages: [{ role: 'user', content: THINKING_PROMPT }],
-    thinking: { type: 'enabled', budget_tokens: 4096 },
-  }, apiKey, { signal, fetchImpl })
-  const thinkingMessage = thinking.message
-  // MiniMax validates `max_tokens` before it checks whether the model still
-  // exists, so a retired model answers the cap request with a cap and only
-  // says it is gone on this request.
-  if (isRetired(thinkingMessage)) return { status: 'retired', modelId }
-  const blocks = Array.isArray(thinking.payload?.content) ? thinking.payload.content : undefined
-  if (blocks === undefined) {
-    if (!/thinking/i.test(thinkingMessage)) {
-      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
-    }
-    // The endpoint refused the `thinking` field, which means this model does
-    // not think. Ask again without it: an answer then is a measurement rather
-    // than a failure.
-    const plain = await postMessage({
-      model: modelId,
-      max_tokens: thinkingTokens,
-      messages: [{ role: 'user', content: THINKING_PROMPT }],
-    }, apiKey, { signal, fetchImpl })
-    const plainBlocks = Array.isArray(plain.payload?.content) ? plain.payload.content : undefined
-    if (plainBlocks === undefined) {
-      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
-    }
-    return { status: 'ok', modelId, maxTokens, supportsThinking: false }
-  }
-  return {
-    status: 'ok',
-    modelId,
-    maxTokens,
-    supportsThinking: blocks.some((block) => block?.type === 'thinking'),
-  }
-}
-```
-
-- [ ] **Step 4: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails**
 
 Run: `node --test test/probe.test.js`
 Expected: FAIL with `Cannot find module '../lib/probe.js'`
 
-- [ ] **Step 5: Write `lib/probe.js`**
+- [ ] **Step 3: Write `lib/probe.js`**
 
 ```js
 /**
@@ -1369,6 +1012,17 @@ export const THINKING_PROMPT = 'What is 17*23? Think it through.'
 
 /** How long one probe request may take. */
 export const PROBE_TIMEOUT_MS = 20_000
+
+/**
+ * How many times the thinking request may be asked before the model counts
+ * as not thinking.
+ *
+ * MiniMax decides for itself whether a request is worth thinking about, so
+ * one answer without a thinking block is not a verdict. Measured over six
+ * requests, MiniMax-M2.7 thought five times and the other live models six
+ * times, so a single sample denies thinking to roughly one model in six.
+ */
+export const THINKING_SAMPLES = 3
 
 /**
  * Read the output cap out of a refusal message.
@@ -1492,19 +1146,28 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
   }
 
   const thinkingTokens = Math.min(8192, maxTokens)
-  const thinking = await postMessage({
-    model: modelId,
-    max_tokens: thinkingTokens,
-    messages: [{ role: 'user', content: THINKING_PROMPT }],
-    thinking: { type: 'enabled', budget_tokens: 4096 },
-  }, apiKey, { signal, fetchImpl })
-  const thinkingMessage = thinking.message
-  // MiniMax validates `max_tokens` before it checks whether the model still
-  // exists, so a retired model answers the cap request with a cap and only
-  // says it is gone on this request.
-  if (isRetired(thinkingMessage)) return { status: 'retired', modelId }
-  const blocks = Array.isArray(thinking.payload?.content) ? thinking.payload.content : undefined
-  if (blocks === undefined) {
+  for (let attempt = 0; attempt < THINKING_SAMPLES; attempt++) {
+    const thinking = await postMessage({
+      model: modelId,
+      max_tokens: thinkingTokens,
+      messages: [{ role: 'user', content: THINKING_PROMPT }],
+      thinking: { type: 'enabled', budget_tokens: 4096 },
+    }, apiKey, { signal, fetchImpl })
+    const thinkingMessage = thinking.message
+    // MiniMax validates `max_tokens` before it checks whether the model still
+    // exists, so a retired model answers the cap request with a cap and only
+    // says it is gone on this request.
+    if (isRetired(thinkingMessage)) return { status: 'retired', modelId }
+    const blocks = Array.isArray(thinking.payload?.content) ? thinking.payload.content : undefined
+    if (blocks !== undefined) {
+      if (blocks.some((block) => block?.type === 'thinking')) {
+        return { status: 'ok', modelId, maxTokens, supportsThinking: true }
+      }
+      // The model answered without thinking. MiniMax decides for itself
+      // whether a request is worth thinking about, so one such answer is not
+      // a verdict — ask again.
+      continue
+    }
     if (!/thinking/i.test(thinkingMessage)) {
       return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
     }
@@ -1522,21 +1185,17 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
     }
     return { status: 'ok', modelId, maxTokens, supportsThinking: false }
   }
-  return {
-    status: 'ok',
-    modelId,
-    maxTokens,
-    supportsThinking: blocks.some((block) => block?.type === 'thinking'),
-  }
+  // Three answers, none of which thought. The model does not think.
+  return { status: 'ok', modelId, maxTokens, supportsThinking: false }
 }
 ```
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/probe.test.js`
-Expected: PASS — 18 tests.
+Expected: PASS — 21 tests.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add lib/probe.js test/probe.test.js
@@ -1548,11 +1207,11 @@ out of the refusal of an over-limit request, which is rejected before
 generation and therefore costs nothing.
 
 The thinking probe has to use a prompt that demands reasoning: a prompt
-like \"hi\" yields a false negative for every model, because there is
-nothing to think about."
+like hi yields a false negative for every model, because there is
+nothing to think about. And because MiniMax decides for itself whether a
+request is worth thinking about, one answer without a thinking block is
+not a verdict — the probe asks again, up to THINKING_SAMPLES times."
 ```
-
----
 
 ## Task 4: Turning a probe result into a pi-ai model entry
 
