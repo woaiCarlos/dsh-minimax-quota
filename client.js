@@ -5,8 +5,9 @@
  * selected model belongs to the MiniMax family, it shows the remaining 5-hour
  * and weekly coding-plan quota, and clicking it opens a details panel.
  *
- * The API key never reaches the browser: the Host answers one same-origin
- * route with the quota view, and this half only reads that route.
+ * Nothing confidential reaches the browser: the Host answers same-origin
+ * routes with the quota view and the model summary, and this half only
+ * talks to those routes.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-minimax-quota',
@@ -389,17 +390,21 @@ window.__ModuleLoader__.load({
      * The section never edits the list itself: the plugin appends and never
      * edits, so the models it added are the user's to keep or to remove by
      * hand. The button only asks; the sync itself runs on the Host.
+     *
+     * The section shows even when no model has been synced yet, so the sync
+     * button is reachable in exactly the state where it is most useful.
      */
     function ModelsPanel({ models, t, onSync, syncing }) {
       if (models === undefined) return null
       const synced = Array.isArray(models.synced) ? models.synced : []
       const added = Array.isArray(models.added) ? models.added : []
-      if (synced.length === 0) return null
       return h('div', { className: '__mmq_models' },
         h('div', { className: '__mmq_sectionTitle' }, t('modelsTitle')),
-        h('div', { className: '__mmq_modelList' },
-          synced.map((id) => h('span', { className: '__mmq_modelChip', key: id }, id)),
-        ),
+        synced.length > 0
+          ? h('div', { className: '__mmq_modelList' },
+              synced.map((id) => h('span', { className: '__mmq_modelChip', key: id }, id)),
+            )
+          : null,
         added.length > 0
           ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
           : null,
@@ -437,15 +442,17 @@ window.__ModuleLoader__.load({
       const view = payload?.quota ?? null
       const models = payload?.models
 
-      // The sync probes the candidates MiniMax offers, which can take a while, so
-      // the button asks and lets the status poll report the result.
+      // The sync probes the candidates MiniMax offers, which can take a
+      // while, so the button asks and waits for the answer.
       const syncNow = async () => {
         if (syncing) return
         setSyncing(true)
         try {
-          await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+          const response = await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+          if (!response.ok) return
         } catch {
-          // A failed request is reported by the status poll; the button only asks.
+          // A failed request leaves the panel as it was. The status poll reports
+          // the model list, not the outcome of the sync.
         } finally {
           setSyncing(false)
         }
