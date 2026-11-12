@@ -945,6 +945,27 @@ test('every request carries a signal and the key travels only in a header', asyn
   assert.equal(String(seen[0].body ?? '').includes('sk-secret'), false)
 })
 
+test('the request that carries the key carries a signal and never returns it', async () => {
+  const seen = []
+  const fetchImpl = async (_url, init) => {
+    seen.push(init)
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M3] does not support max tokens > 524288 (2013)' },
+      })
+    }
+    return jsonResponse({ content: [{ type: 'thinking', thinking: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M3', 'sk-secret', { fetchImpl })
+  assert.equal(seen.length >= 1, true)
+  for (const request of seen) {
+    assert.ok(request.signal instanceof AbortSignal)
+    assert.equal(request.headers['x-api-key'], 'sk-secret')
+  }
+  assert.equal(JSON.stringify(result).includes('sk-secret'), false)
+})
+
 test('postMessage reports a network failure', async () => {
   const fetchImpl = async () => { throw new Error('fetch failed') }
   const result = await postMessage({ model: 'x' }, 'sk-test', { fetchImpl })
@@ -1151,7 +1172,7 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
       model: modelId,
       max_tokens: thinkingTokens,
       messages: [{ role: 'user', content: THINKING_PROMPT }],
-      thinking: { type: 'enabled', budget_tokens: 4096 },
+      thinking: { type: 'enabled', budget_tokens: Math.min(4096, thinkingTokens) },
     }, apiKey, { signal, fetchImpl })
     const thinkingMessage = thinking.message
     // MiniMax validates `max_tokens` before it checks whether the model still
@@ -1181,7 +1202,7 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
     }, apiKey, { signal, fetchImpl })
     const plainBlocks = Array.isArray(plain.payload?.content) ? plain.payload.content : undefined
     if (plainBlocks === undefined) {
-      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
+      return { status: 'failed', modelId, reason: plain.message || `HTTP ${plain.status}` }
     }
     return { status: 'ok', modelId, maxTokens, supportsThinking: false }
   }
@@ -1193,7 +1214,7 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/probe.test.js`
-Expected: PASS — 21 tests.
+Expected: PASS — 22 tests.
 
 - [ ] **Step 5: Commit**
 
