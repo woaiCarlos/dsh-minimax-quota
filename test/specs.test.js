@@ -90,3 +90,7 @@ test('the snapshot is frozen all the way down', () => {
   assert.throws(() => { MODEL_SPECS['MiniMax-M3'].contextWindow = 1 }, TypeError)
   assert.throws(() => FALLBACK_SPEC.modalities.push('video'), TypeError)
 })
+
+test('the modality list cannot be mutated', () => {
+  assert.throws(() => SUPPORTED_MODALITIES.push('video'), TypeError)
+})
