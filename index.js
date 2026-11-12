@@ -1,21 +1,198 @@
 /**
- * Host half of the MiniMax quota bundle.
+ * Host half of the MiniMax bundle.
  *
- * The API key lives in the Host's credential store, so quota can only be read
- * here. The Host fetches the coding-plan remainder on demand and answers the
- * browser through one same-origin route that the Client half polls.
+ * Two jobs live here. The first is the coding-plan quota the Browser half
+ * shows below the composer. The second is keeping the profile's MiniMax
+ * model list current: newly released models are probed and appended, and
+ * nothing the user already has is ever touched.
+ *
+ * The API key lives in the Host's credential store, so neither job can run
+ * in the browser. The Host answers the Browser half through same-origin
+ * routes and never forwards a secret.
  */
 
+import { resolveApiKey } from './lib/credentials.js'
 import { fetchQuota } from './lib/quota.js'
+import { fetchModelIds, probeModel } from './lib/probe.js'
+import { buildModelEntry } from './lib/model-entry.js'
+import { planAppend } from './lib/merge.js'
+import { readState, writeState } from './lib/state.js'
 
 /** Credential reference the pi-ai profile names for the MiniMax route. */
 const DEFAULT_CREDENTIAL_REF = 'MINIMAX_CN_API_KEY'
 
-/** Route the Client half reads. */
-const ROUTE_PATH = '/plugin/minimax-quota'
+/** Route the Browser half reads. */
+const STATUS_ROUTE = '/plugin/minimax/status'
+
+/** Route the Browser half posts to when the user asks for a sync. */
+const SYNC_ROUTE = '/plugin/minimax/sync'
+
+/** The pi-ai settings namespace that holds the provider list. */
+const SETTINGS_NAMESPACE = 'llm-pi-ai'
+
+/** The provider route inside that namespace. */
+const PROVIDER_ROUTE = 'minimax-cn'
 
 /**
- * Host entry: expose the quota route and answer it from the credential store.
+ * Read the profile's current MiniMax model list.
+ *
+ * @param settings - the settings service.
+ * @returns the descriptor of the pi-ai namespace, or undefined.
+ */
+function readProviderDescriptor(settings) {
+  if (settings === undefined) return undefined
+  const descriptor = settings.describe().find((row) => row.ns === SETTINGS_NAMESPACE)
+  return descriptor
+}
+
+/**
+ * The model entries the profile currently lists.
+ *
+ * @param descriptor - the pi-ai namespace descriptor.
+ * @returns the listed entries.
+ */
+function currentModels(descriptor) {
+  const models = descriptor?.value?.providers?.[PROVIDER_ROUTE]?.models
+  return Array.isArray(models) ? models : []
+}
+
+/** The sync that is running right now, so a second caller waits for it. */
+let inFlight = null
+
+/**
+ * Run one sync.
+ *
+ * One sync runs at a time. Two overlapping syncs would race on the profile
+ * write and on the state file, and the second would either lose the write
+ * or record a state that does not match the profile.
+ *
+ * @param ctx - Host context.
+ * @param options - the sync options.
+ * @returns the sync result.
+ */
+export async function runSync(ctx, options = {}) {
+  if (inFlight !== null) return inFlight
+  inFlight = runSyncOnce(ctx, options)
+  try {
+    return await inFlight
+  } finally {
+    inFlight = null
+  }
+}
+
+/**
+ * Do the work of one sync.
+ *
+ * Every candidate model is probed and the ones that answer are appended.
+ * The plugin only ever appends: an entry the user already has is left
+ * exactly as it is, and a model the user removed by hand is not added
+ * back, because the ids this plugin added are remembered.
+ *
+ * @param ctx - Host context.
+ * @param options - `{ credentialRef, profileDir, fetchImpl, stateReader, stateWriter, now }`.
+ * @returns the sync outcome.
+ */
+async function runSyncOnce(ctx, options = {}) {
+  const credentialRef = options.credentialRef ?? DEFAULT_CREDENTIAL_REF
+  const settings = ctx.get('settings')
+  if (settings === undefined) return { ok: false, reason: 'missing-settings' }
+  const descriptor = readProviderDescriptor(settings)
+  if (descriptor === undefined) return { ok: false, reason: 'missing-namespace' }
+  const apiKey = await resolveApiKey(ctx, credentialRef)
+  if (apiKey === undefined) return { ok: false, reason: 'missing-credential' }
+
+  const profileDir = options.profileDir ?? ctx.get('profileContext')?.dir
+  const readStateFn = options.stateReader ?? (profileDir === undefined
+    ? async () => ({ addedModels: [], lastSyncAt: null })
+    : (dir) => readState(dir))
+  const writeStateFn = options.stateWriter ?? (profileDir === undefined
+    ? async () => {}
+    : (dir, state) => writeState(dir, state))
+
+  const state = await readStateFn(profileDir)
+  const listed = currentModels(descriptor)
+  const ids = await fetchModelIds(apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
+  if (ids === null) {
+    // The list could not be read. That is not an empty account, and it must
+    // not be mistaken for one.
+    return { ok: false, reason: 'model-list-failed' }
+  }
+  const candidateIds = ids
+    .filter((id) => !listed.some((entry) => entry?.id === id) && !state.addedModels.includes(id))
+
+  const entries = new Map()
+  for (const id of candidateIds) {
+    const probe = await probeModel(id, apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
+    if (probe.status !== 'ok') continue
+    entries.set(id, buildModelEntry(id, probe))
+  }
+
+  const plan = planAppend({
+    currentModels: listed,
+    addedModels: state.addedModels,
+    candidateIds,
+    entries,
+  })
+  if (!plan.changed) {
+    return { ok: true, added: [], models: listed }
+  }
+
+  await settings.write(SETTINGS_NAMESPACE, (current) => ({
+    ...current,
+    providers: {
+      ...current.providers,
+      [PROVIDER_ROUTE]: {
+        ...current.providers?.[PROVIDER_ROUTE],
+        models: plan.models,
+      },
+    },
+  }), descriptor.revision, ['providers', PROVIDER_ROUTE, 'models'])
+
+  const now = options.now ?? Date.now
+  try {
+    await writeStateFn(profileDir, {
+      addedModels: [...state.addedModels, ...plan.addedIds],
+      lastSyncAt: now(),
+    })
+  } catch {
+    // The models are already in the profile, so a failed bookkeeping write
+    // must not fail the sync. The next sync writes the state again.
+  }
+  return { ok: true, added: plan.addedIds, models: plan.models }
+}
+
+/**
+ * Assemble what the Browser half reads.
+ *
+ * @param ctx - Host context.
+ * @param options - `{ credentialRef, stateReader, quotaFetcher }`.
+ * @returns the status payload.
+ */
+export async function buildStatusPayload(ctx, options = {}) {
+  const credentialRef = options.credentialRef ?? DEFAULT_CREDENTIAL_REF
+  const settings = ctx.get('settings')
+  const descriptor = readProviderDescriptor(settings)
+  const profileDir = options.profileDir ?? ctx.get('profileContext')?.dir
+  const readStateFn = options.stateReader ?? (profileDir === undefined
+    ? async () => ({ addedModels: [], lastSyncAt: null })
+    : (dir) => readState(dir))
+  const quotaFetcher = options.quotaFetcher ?? ((c, ref, signal) => fetchQuota(c, ref, signal))
+  const state = await readStateFn(profileDir)
+  const quota = await quotaFetcher(ctx, credentialRef, options.signal)
+  const models = currentModels(descriptor)
+  const synced = models.map((entry) => entry?.id).filter((id) => typeof id === 'string')
+  return {
+    quota,
+    models: {
+      synced,
+      added: state.addedModels,
+      syncedAt: state.lastSyncAt,
+    },
+  }
+}
+
+/**
+ * Host entry: expose the routes and keep the model list current.
  *
  * @param ctx - Host context.
  * @param config - plugin configuration.
@@ -27,32 +204,88 @@ export async function apply(ctx, config) {
   // so the route is never silently skipped.
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
-    throw new Error('minimax-quota: the webServer service is unavailable, so the quota route cannot be registered')
+    throw new Error('dsh-minimax-quota: the webServer service is unavailable, so the routes cannot be registered')
   }
-  const dispose = webServer.register({
-    kind: 'exact',
-    path: ROUTE_PATH,
-    async handler(req, res) {
-      const abort = new AbortController()
-      req.once('close', () => {
-        if (!res.writableEnded) abort.abort()
-      })
-      const view = await fetchQuota(ctx, credentialRef, abort.signal)
-      const body = JSON.stringify(view)
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': 'no-store',
-      })
-      res.end(body)
-    },
-  })
-  ctx.effect(() => dispose, 'minimax-quota: quota route')
+
+  const send = (res, payload, status = 200) => {
+    res.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    res.end(JSON.stringify(payload))
+  }
+
+  const disposers = [
+    webServer.register({
+      kind: 'exact',
+      path: STATUS_ROUTE,
+      async handler(req, res) {
+        const abort = new AbortController()
+        req.once('close', () => {
+          if (!res.writableEnded) abort.abort()
+        })
+        try {
+          send(res, await buildStatusPayload(ctx, { credentialRef, signal: abort.signal }))
+        } catch (error) {
+          // The route answers every sixty seconds; an unwritten response would
+          // leave the browser's request pending forever and stop its polling.
+          send(res, {
+            quota: { ok: false, reason: 'request-failed', message: error instanceof Error ? error.message : String(error) },
+            models: { synced: [], added: [], syncedAt: null },
+          })
+        }
+      },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: SYNC_ROUTE,
+      async handler(req, res) {
+        if (req.method !== 'POST') {
+          send(res, { ok: false, reason: 'method-not-allowed' }, 405)
+          return
+        }
+        const abort = new AbortController()
+        req.once('close', () => {
+          if (!res.writableEnded) abort.abort()
+        })
+        try {
+          send(res, await runSync(ctx, { credentialRef, signal: abort.signal }))
+        } catch (error) {
+          send(res, { ok: false, reason: 'sync-failed', message: error instanceof Error ? error.message : String(error) })
+        }
+      },
+    }),
+  ]
+  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax-quota: routes')
+
+  // The profile may still be loading, so the first sync waits for the pi-ai
+  // namespace to appear before it gives up.
+  void scheduleSync(ctx, credentialRef)
+}
+
+/**
+ * Run the first sync once the profile has settled.
+ *
+ * @param ctx - Host context.
+ * @param credentialRef - credential reference to resolve.
+ */
+async function scheduleSync(ctx, credentialRef) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    try {
+      const result = await runSync(ctx, { credentialRef })
+      if (result.ok || result.reason === 'missing-credential') return
+    } catch {
+      // A failed sync must never take the plugin down; the next attempt
+      // tries again.
+    }
+  }
 }
 
 /**
  * Services this plugin waits for before it activates.
  */
-export const inject = ['webServer']
+export const inject = ['webServer', 'credentials', 'settings']
 
 /**
  * A Standard Schema for the plugin's configuration.
@@ -65,21 +298,21 @@ export const inject = ['webServer']
 const Config = {
   '~standard': {
     version: 1,
-    vendor: '@local/dsh-minimax-quota',
+    vendor: 'dsh-minimax-quota',
     validate(value) {
       const raw = value === undefined || value === null ? {} : value
       if (typeof raw !== 'object' || Array.isArray(raw)) {
-        return { issues: [{ message: 'minimax-quota: config must be an object' }] }
+        return { issues: [{ message: 'dsh-minimax-quota: config must be an object' }] }
       }
       const issues = []
       const config = {}
       for (const [key, entry] of Object.entries(raw)) {
         if (key !== 'credentialRef') {
-          issues.push({ message: `minimax-quota: unknown config field "${key}"`, path: [key] })
+          issues.push({ message: `dsh-minimax-quota: unknown config field "${key}"`, path: [key] })
           continue
         }
         if (typeof entry !== 'string' || entry.length === 0) {
-          issues.push({ message: 'minimax-quota: credentialRef must be a non-empty string', path: [key] })
+          issues.push({ message: 'dsh-minimax-quota: credentialRef must be a non-empty string', path: [key] })
           continue
         }
         config.credentialRef = entry
