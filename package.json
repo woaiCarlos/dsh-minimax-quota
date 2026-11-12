@@ -26,13 +26,11 @@
     "README.md",
     "client.js",
     "cordis.patch.yml",
-    "docs",
     "dsh-plugin.json",
     "icon.svg",
     "index.js",
     "lib",
-    "locale/*.json",
-    "package-lock.json"
+    "locale/*.json"
   ],
   "repository": {
     "type": "git",

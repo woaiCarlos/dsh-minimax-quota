@@ -39,8 +39,10 @@ jobs:
 
       - name: Guard against committed secrets
         run: |
-          # No real API key may ever enter the repository.
-          if git grep -nE "sk-[A-Za-z0-9_-]{16,}" -- . ':!README*.md'; then
+          # No real MiniMax key may ever enter the repository, and the
+          # READMEs are part of it: a key pasted into a README is a
+          # committed value like any other, so they are scanned too.
+          if git grep -nE "sk-[A-Za-z0-9_-]{16,}" -- .; then
             echo "::error::a credential-like value is committed to this repository"
             exit 1
           fi
