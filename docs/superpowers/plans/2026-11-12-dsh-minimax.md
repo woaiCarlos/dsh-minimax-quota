@@ -795,6 +795,25 @@ test('probeModel reports a retired model instead of failing', async () => {
   assert.equal(result.modelId, 'MiniMax-M2')
 })
 
+test('probeModel reports a retired model whose cap request still answers', async () => {
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      // MiniMax validates max_tokens before it checks whether the model still
+      // exists, so the cap request answers even for a retired model.
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M2] does not support max tokens > 196608 (2013)' },
+      })
+    }
+    return jsonResponse({
+      error: { message: 'The model "MiniMax-M2" is no longer available. (2069)' },
+    })
+  }
+  const result = await probeModel('MiniMax-M2', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'retired')
+  assert.equal(result.modelId, 'MiniMax-M2')
+})
+
 test('probeModel detects a model that thinks', async () => {
   const fetchImpl = async (_url, init) => {
     const body = JSON.parse(init.body)
@@ -987,9 +1006,15 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
     messages: [{ role: 'user', content: THINKING_PROMPT }],
     thinking: { type: 'enabled', budget_tokens: 4096 },
   }, apiKey, { signal, fetchImpl })
+  const thinkingMessage = thinking.message
+  // MiniMax validates `max_tokens` before it checks whether the model still
+  // exists. A retired model therefore answers the cap request with a cap and
+  // only says it is gone on the next request, so the retired check has to
+  // read this response too.
+  if (isRetired(thinkingMessage)) return { status: 'retired', modelId }
   const blocks = Array.isArray(thinking.payload?.content) ? thinking.payload.content : undefined
   if (blocks === undefined) {
-    return { status: 'failed', modelId, reason: thinking.message || `HTTP ${thinking.status}` }
+    return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
   }
   return {
     status: 'ok',
@@ -1003,7 +1028,7 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `node --test test/probe.test.js`
-Expected: PASS — 10 tests.
+Expected: PASS — 11 tests.
 
 - [ ] **Step 7: Commit**
 
