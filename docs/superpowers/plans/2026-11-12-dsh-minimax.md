@@ -2238,7 +2238,7 @@ Expected: a JSON object with a `quota` key and a `models` key.
 - [ ] **Step 5: Verify the profile received the models**
 
 ```bash
-grep -n -A 30 "minimax-cn" "$PROFILE_DIR/cordis.patch.yml
+grep -n -A 30 "minimax-cn" "$PROFILE_DIR/cordis.patch.yml"
 ```
 
 Expected: the `models:` list under `providers.minimax-cn` carries entries with `contextWindow`, `maxTokens`, `input` and `reasoningEfforts`.
