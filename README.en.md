@@ -8,7 +8,7 @@ Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness cha
 - The pill reads `5h 95% · Week 37%`, each number with a status dot: green (>40%), amber (≤40%), red (≤15%).
 - Clicking opens a panel: remaining percentage per window, a progress bar, time until each window resets, and when the reading was fetched.
 - Follows the host light/dark theme; all visible text goes through the Harness locale service (Chinese and English included).
-- It also appends newly released MiniMax models to your configured model list — append only, the entries you already have keep their wording.
+- It also appends newly released MiniMax models to your configured model list — append only: nothing is removed, nothing is reordered, and the entries themselves come back as they are unless your profile override carries no MiniMax model list of its own (see "Automatic model sync" below).
 
 ## Install
 
@@ -44,7 +44,8 @@ url: https://github.com/woaiCarlos/dsh-minimax-quota
 name: woaiCarlos/dsh-minimax-quota
 category: usage
 description:
-  en: 'Shows the remaining MiniMax coding-plan quota (5-hour window and weekly window) below the chat composer, with the detail on click.'
+  en: 'Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile''s MiniMax model list current by appending newly released models.'
+  zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度，并把新发布的模型追加到配置的模型列表里。'
 icon: https://raw.githubusercontent.com/woaiCarlos/dsh-minimax-quota/main/assets/icon-180.png
 ```
 
@@ -182,9 +183,11 @@ locale/     Chinese and English strings
 
 The plugin probes the models MiniMax has just released and appends them to the `providers.minimax-cn.models` list in the pi-ai configuration.
 Every new model is measured: whether it still answers, what its maximum output per call is, and whether it supports thinking.
-**The entries you already have are never removed, never reordered and never changed in value** — the plugin only appends. A model you deleted by hand is not added back either.
+**The entries you already have are never removed and never reordered** — the plugin only appends; their values are not rewritten either, unless your profile override carries no MiniMax model list of its own (see below). A model you deleted by hand is not added back either.
 
-One thing to know about the write: the **route-level defaults the pi-ai schema resolves** (`defaultContextWindow`, `defaultMaxTokens` and the like) land in that route in the profile patch along with the new list. **The model entries you wrote are written back exactly as they are.**
+A few things are worth knowing about the write: the **route-level defaults the pi-ai schema resolves** (`defaultContextWindow`, `defaultMaxTokens` and the like) land in that route in the profile patch along with the new list, and the write puts the **whole effective `providers` map** into the patch, so **every other provider route you have** — including one configured only in an inherited layer — lands in the patch too, carrying its own schema-resolved defaults, while a profile override that carries no MiniMax model list of its own means the entries written back are the effective projection's, already carrying a materialised `compat` block.
+
+**The model entries you wrote are written back as they are** — but only when your profile override carries a MiniMax model list of its own.
 
 ### When the sync runs
 

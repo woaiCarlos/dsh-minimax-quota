@@ -8,7 +8,7 @@
 - 药丸显示 `5小时 95% · 周 37%`，两个数字各带一个状态圆点：绿（>40%）、橙（≤40%）、红（≤15%）。
 - 点击弹出面板：每个窗口的剩余百分比、进度条、距离重置还有多久、数据更新时间。
 - 支持明暗主题；界面文案走 Harness 的 locale 服务（内置中英文）。
-- 还会自动把 MiniMax 新发布的模型补进配置里的模型列表 —— 只追加，你已有的条目原样保留。
+- 还会自动把 MiniMax 新发布的模型补进配置里的模型列表 —— 只追加：不删除、不重排；条目本身按原样写回，除非 profile override 里没写过自己的 MiniMax 模型列表（见下文「模型自动补充」）。
 
 ## 安装
 
@@ -45,8 +45,8 @@ url: https://github.com/woaiCarlos/dsh-minimax-quota
 name: woaiCarlos/dsh-minimax-quota
 category: usage
 description:
-  en: 'Shows the remaining MiniMax coding-plan quota (5-hour window and weekly window) below the chat composer, with the detail on click.'
-  zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度（5 小时窗口与周窗口），点击可查看详情。'
+  en: 'Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile''s MiniMax model list current by appending newly released models.'
+  zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度，并把新发布的模型追加到配置的模型列表里。'
 icon: https://raw.githubusercontent.com/woaiCarlos/dsh-minimax-quota/main/assets/icon-180.png
 ```
 
@@ -189,10 +189,14 @@ locale/     中英文文案
 
 插件会探测 MiniMax 新发布的模型，把它们追加到 pi-ai 配置的 `providers.minimax-cn.models` 里。
 每个新模型都会实测：是否还能调用、单次最大输出是多少、是否支持思考。
-**你已有的条目不会被删除、不会被重排、也不会被改值** —— 插件只追加。手动删掉的模型也不会被加回来。
+**你已有的条目不会被删除、不会被重排** —— 插件只追加；条目的值也不会被改写，除非 profile override 里没写过自己的 MiniMax 模型列表（见下一段）。手动删掉的模型也不会被加回来。
 
-写回时有一处需要说明：pi-ai schema 解析出来的**路由级默认值**（`defaultContextWindow`、`defaultMaxTokens` 等）
-会随这次写入一并落到 profile patch 的那条路由上；你写的**模型条目本身**按原样写回，一个字都不改。
+写回时有几处需要说明：pi-ai schema 解析出来的**路由级默认值**（`defaultContextWindow`、`defaultMaxTokens` 等）
+会随这次写入一并落到 profile patch 的那条路由上；这次写入写进 patch 的是**整张生效的 providers 表**，
+所以**你其它每一条 provider 路由**（包括只在继承层里配置过的那条）也会一起写进去并各自带上 schema 解析出来的默认值，
+而当 profile override 自己没写过 MiniMax 模型列表时，写回的是生效投影里已经带着物化 `compat` 块的条目。
+
+**模型条目本身按原样写回** —— 但这只在 profile override 自己写过 MiniMax 模型列表时成立。
 
 ### 同步的节奏
 

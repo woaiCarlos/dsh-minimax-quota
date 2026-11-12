@@ -27,6 +27,8 @@
     "client.js",
     "cordis.patch.yml",
     "dsh-plugin.json",
+    "docs/market-entry.png",
+    "docs/screenshot-panel.png",
     "icon.svg",
     "index.js",
     "lib",
