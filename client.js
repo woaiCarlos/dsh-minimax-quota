@@ -116,7 +116,7 @@ window.__ModuleLoader__.load({
       '.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
       '.__mmq_syncButton{margin-top:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);padding:2px 8px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;cursor:pointer;pointer-events:auto}',
       '.__mmq_syncButton:disabled{opacity:.6;cursor:default}',
-      '.__mmq_badge{position:absolute;top:-2px;right:-2px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}',
+      '.__mmq_badge{position:absolute;top:-6px;right:-8px;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-on-color);font-size:10px;line-height:16px;text-align:center;font-variant-numeric:tabular-nums;pointer-events:none;align-items:center;justify-content:center;display:inline-flex}',
       '.__mmq_pillWrap{position:relative;display:inline-flex}',
     ].join('')
 
@@ -195,6 +195,95 @@ window.__ModuleLoader__.load({
       if (percent <= 15) return ' __mmq_barFillCritical'
       if (percent <= 40) return ' __mmq_barFillLow'
       return ''
+    }
+
+    // ── the models the user has been told about ───────────────────────────
+    /** The storage key that holds the ids of the models the user was told about. */
+    const SEEN_MODELS_KEY = 'dsh-minimax.seen-models'
+
+    /**
+     * The model ids the storage holds.
+     *
+     * The stored value is a JSON array of model ids. A value that is not
+     * such an array — or that is not JSON at all — holds nothing, so it is
+     * read as the empty set.
+     *
+     * @param storage - the browser's local storage.
+     * @returns `{ ok, ids }`: `ok` says whether the stored value could be
+     *   read at all, `ids` holds the model ids it names.
+     */
+    function storedSeenModels(storage) {
+      let raw
+      try {
+        raw = storage.getItem(SEEN_MODELS_KEY)
+      } catch {
+        // A storage that refuses to be read holds nothing that can be
+        // trusted, so a write must not replace it.
+        return { ok: false, ids: new Set() }
+      }
+      if (raw === null || raw === undefined) return { ok: true, ids: new Set() }
+      try {
+        const parsed = JSON.parse(raw)
+        if (!Array.isArray(parsed)) return { ok: true, ids: new Set() }
+        return { ok: true, ids: new Set(parsed.filter((id) => typeof id === 'string')) }
+      } catch {
+        // A corrupt value holds nothing, so it is read as the empty set and
+        // the next write repairs it.
+        return { ok: true, ids: new Set() }
+      }
+    }
+
+    /**
+     * The models the user has already been told about.
+     *
+     * The set lives in the browser's own storage, so it survives a remount,
+     * a new conversation, a new tab and a restart of the app — which is what
+     * the badge needs, because the pill is mounted in the chat composer and
+     * a conversation switch mounts it again.
+     *
+     * The storage can be missing, can throw when it is touched and can hold
+     * a corrupt value, so every access degrades to the empty set instead of
+     * throwing.
+     *
+     * @returns the set of seen model ids.
+     */
+    function readSeenModels() {
+      try {
+        const storage = window.localStorage
+        if (storage === null || storage === undefined) return new Set()
+        return storedSeenModels(storage).ids
+      } catch {
+        // Some private browsing modes throw when the storage is touched.
+        return new Set()
+      }
+    }
+
+    /**
+     * Remember the models the user has been told about.
+     *
+     * The write merges: the ids are added to what is already stored, so a
+     * model the user was told about earlier stays remembered. A storage that
+     * cannot be written to leaves the plugin working, just without the
+     * memory.
+     *
+     * @param ids - the model ids to remember.
+     */
+    function writeSeenModels(ids) {
+      if (!Array.isArray(ids) || ids.length === 0) return
+      try {
+        const storage = window.localStorage
+        if (storage === null || storage === undefined) return
+        const stored = storedSeenModels(storage)
+        // A value that could not be read is not replaced: the write would
+        // drop what is already stored.
+        if (!stored.ok) return
+        for (const id of ids) {
+          if (typeof id === 'string') stored.ids.add(id)
+        }
+        storage.setItem(SEEN_MODELS_KEY, JSON.stringify([...stored.ids]))
+      } catch {
+        // A storage that refuses to be written to leaves the plugin working.
+      }
     }
 
     // ── status fetching ────────────────────────────────────────────────────
@@ -464,12 +553,14 @@ window.__ModuleLoader__.load({
       const active = selectionIsMiniMax(current)
       const [payload, setPayload] = React.useState(null)
       const [open, setOpen] = React.useState(false)
-      const [noticeSeen, setNoticeSeen] = React.useState(false)
+      const [seen, setSeen] = React.useState(() => readSeenModels())
       const [syncing, setSyncing] = React.useState(false)
       const [syncError, setSyncError] = React.useState(null)
       const [position, setPosition] = React.useState(null)
       const rootRef = React.useRef(null)
       const panelRef = React.useRef(null)
+      // Whether the models of this panel opening have been told already.
+      const toldRef = React.useRef(false)
 
       // The status route answers both halves: the quota the pill shows and
       // the model summary the panel lists.
@@ -524,13 +615,39 @@ window.__ModuleLoader__.load({
         }
       }, [active, current?.provider, current?.model])
 
-      // The badge marks "there are models you did not add by hand". The
-      // plugin's list of added models is cumulative, so the badge is a hint
-      // rather than a queue: it clears once the user has opened the panel,
-      // which lists the whole set either way.
+      // The badge counts the models the plugin added that the user has not
+      // been told about yet. The plugin's own list of added models is
+      // cumulative, so the count — not the list — is what says whether
+      // there is news.
+      const addedModels = Array.isArray(payload?.models?.added) ? payload.models.added : []
+      const unseen = addedModels.filter((id) => !seen.has(id))
+
+      // Tell the user about the models the plugin added: they are marked as
+      // seen and remembered, so the badge stays away — also after the user
+      // opens a different conversation.
+      const markSeen = React.useCallback((ids) => {
+        const fresh = ids.filter((id) => !seen.has(id))
+        if (fresh.length === 0) return
+        const next = new Set(seen)
+        for (const id of fresh) next.add(id)
+        setSeen(next)
+        writeSeenModels(fresh)
+      }, [seen])
+
+      // Opening the panel is the moment the user is told which models the
+      // plugin added. The panel only shows once the status route answered,
+      // so the marking waits for the payload; a model that arrives while
+      // the panel is open is still news to the user.
       React.useEffect(() => {
-        if (open) setNoticeSeen(true)
-      }, [open])
+        if (!open) {
+          toldRef.current = false
+          return
+        }
+        if (toldRef.current) return
+        if (payload === null) return
+        toldRef.current = true
+        markSeen(addedModels)
+      }, [open, payload])
 
       // Place the panel above the trigger, inside the viewport. The panel is
       // portaled into the document body, so its node attaches after this
@@ -646,10 +763,6 @@ window.__ModuleLoader__.load({
       // so a quota that could not be read must not lock them away.
       const showPanel = open && payload !== null
 
-      // The badge tells the user that the plugin added models, until they
-      // have opened the panel and read the list themselves.
-      const hasNotice = !noticeSeen && (payload?.models?.added?.length ?? 0) > 0
-
       // A screen reader gets the same two numbers the pill shows.
       const ariaLabel =
         view !== null && view.ok === true
@@ -680,17 +793,35 @@ window.__ModuleLoader__.load({
               'aria-expanded': showPanel,
               'aria-label': ariaLabel,
               onClick: () => {
-                setOpen((previous) => !previous)
-                // Opening is the moment the user wants the freshest reading.
-                readStatus().then((result) => {
-                  setPayload(result)
-                })
+                const opening = !open
+                setOpen(opening)
+                // Opening is the moment the user wants the freshest reading,
+                // so the status route is read once. The read is not cached:
+                // the quota has to reach MiniMax every time. Closing the
+                // panel needs no reading, because it is about to disappear.
+                if (opening) {
+                  readStatus().then((result) => {
+                    setPayload(result)
+                  })
+                }
               },
             },
             h(QuotaIcon, null),
             h('span', { className: '__mmq_label' }, label),
           ),
-          hasNotice ? h('span', { className: '__mmq_badge', 'aria-hidden': true }) : null,
+          // The badge is the number of models the user has not been told
+          // about, and it carries the locale string as its name, so a screen
+          // reader says what the number means.
+          unseen.length > 0
+            ? h(
+                'span',
+                {
+                  className: '__mmq_badge',
+                  'aria-label': t('modelsAdded', { count: unseen.length }),
+                },
+                unseen.length,
+              )
+            : null,
         ),
         showPanel
           ? ReactDOM.createPortal(

@@ -185,15 +185,83 @@ async function flush(rounds = 20) {
 }
 
 /**
+ * A local storage double.
+ *
+ * The browser half remembers the models the user has been told about in the
+ * browser's own storage, so a test needs one to look at — and one that
+ * misbehaves, because a real browser's storage can be missing or can throw.
+ *
+ * @param options - `{ mode }`: `ok` stores the values, `missing` has no
+ *   storage at all, `throw` throws when the storage is touched, and
+ *   `failing` has a storage whose every method throws.
+ * @returns the storage double.
+ */
+function createStorage({ mode = 'ok' } = {}) {
+  if (mode === 'missing') {
+    return {
+      mode,
+      install() {},
+    }
+  }
+  if (mode === 'throw') {
+    return {
+      mode,
+      install(target) {
+        // Some private browsing modes throw when the storage is touched.
+        Object.defineProperty(target, 'localStorage', {
+          get() {
+            throw new Error('the storage is blocked')
+          },
+          enumerable: true,
+          configurable: true,
+        })
+      },
+    }
+  }
+  if (mode === 'failing') {
+    const storage = {
+      mode,
+      getItem() {
+        throw new Error('the storage is blocked')
+      },
+      setItem() {
+        throw new Error('the storage is blocked')
+      },
+      install(target) {
+        target.localStorage = storage
+      },
+    }
+    return storage
+  }
+  const values = new Map()
+  const storage = {
+    mode,
+    values,
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null
+    },
+    setItem(key, value) {
+      values.set(key, String(value))
+    },
+    install(target) {
+      target.localStorage = storage
+    },
+  }
+  return storage
+}
+
+/**
  * Load the browser half the way the Harness loads it.
  *
  * The module registers itself with the page's module loader, so the fake
  * loader captures it and the test calls its factory with a stand-in for the
  * module registry.
  *
+ * @param options - `{ storage }`: the local storage double to install on
+ *   the fake window.
  * @returns `{ module, window }`.
  */
-async function loadClient() {
+async function loadClient({ storage } = {}) {
   const source = await readFile(CLIENT_PATH, 'utf8')
   let captured = null
   const timers = new Map()
@@ -217,6 +285,7 @@ async function loadClient() {
     innerWidth: 1280,
     innerHeight: 800,
   }
+  if (storage !== undefined) storage.install(fakeWindow)
   const fakeDocument = {
     querySelector: () => null,
     createElement: () => ({ dataset: {}, setAttribute() {}, textContent: '' }),
@@ -253,12 +322,12 @@ function statusPayload({
 /**
  * Mount the pill the browser half registers.
  *
- * @param options - `{ fetchImpl }`.
+ * @param options - `{ fetchImpl, storage }`.
  * @returns the mounted pill: a function that renders it, the dictionaries
  *   it registered, and the requests it made.
  */
-async function mountPill({ fetchImpl }) {
-  const { module } = await loadClient()
+async function mountPill({ fetchImpl, storage }) {
+  const { module } = await loadClient({ storage })
   const { React, render, unmount } = createReact()
   const ReactDOM = {
     createPortal: (node, container) => ({ node, container }),
@@ -295,8 +364,9 @@ async function mountPill({ fetchImpl }) {
   const props = {
     useProjection: () => ({ next: { provider: 'minimax-cn', model: 'MiniMax-M3' } }),
     // The Harness locale service answers an unregistered key with the key
-    // name itself, so the test reads the key.
-    t: (key) => key,
+    // name itself, so the test reads the key. A key that takes parameters
+    // carries them along, so a test can see the count.
+    t: (key, params) => (params === undefined ? key : `${key} ${JSON.stringify(params)}`),
   }
   const originalFetch = globalThis.fetch
   globalThis.fetch = fetchImpl
@@ -481,6 +551,185 @@ test('the locale dictionaries and the locale files carry the same keys', async (
     // name itself in the page, so the two have to agree.
     assert.deepEqual(Object.keys(dictionaries.zh).sort(), Object.keys(zhFile).sort())
     assert.deepEqual(Object.keys(dictionaries.en).sort(), Object.keys(enFile).sort())
+  } finally {
+    pill.dispose()
+  }
+})
+
+/**
+ * A status payload that reports the given added models.
+ *
+ * @param added - the model ids the plugin added.
+ * @returns the payload.
+ */
+function addedPayload(added) {
+  return statusPayload({
+    models: {
+      synced: ['MiniMax-M3', ...added],
+      added,
+      syncedAt: null,
+    },
+  })
+}
+
+test('the badge shows how many models the user has not been told about', async () => {
+  const storage = createStorage()
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5', 'MiniMax-M3.1'])), { status: 200 }),
+  })
+  try {
+    const tree = await settle(pill)
+    const badge = byClass(tree, '__mmq_badge')
+    assert.ok(badge !== undefined, 'the badge did not render')
+    // The badge is the number, not a dot.
+    assert.equal(textOf(badge), '2')
+    // And it is not a mystery: it carries the locale string as its name.
+    assert.ok(String(badge.props['aria-label']).includes('modelsAdded'))
+    assert.ok(String(badge.props['aria-label']).includes('2'))
+    assert.equal(badge.props['aria-hidden'], undefined)
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('opening the panel clears the badge and remembers it', async () => {
+  const storage = createStorage()
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5'])), { status: 200 }),
+  })
+  try {
+    let tree = await settle(pill)
+    assert.ok(byClass(tree, '__mmq_badge') !== undefined, 'the badge did not render')
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge stayed after the panel opened')
+    // The models are remembered, so the next mount does not show them again.
+    const stored = JSON.parse(storage.values.get('dsh-minimax.seen-models'))
+    assert.deepEqual(stored, ['MiniMax-M2.5'])
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('a remount does not bring the badge back', async () => {
+  const storage = createStorage()
+  const fetchImpl = async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5'])), { status: 200 })
+  const first = await mountPill({ storage, fetchImpl })
+  try {
+    let tree = await settle(first)
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = first.render()
+    await flush()
+    tree = first.render()
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge stayed after the panel opened')
+  } finally {
+    first.dispose()
+  }
+  // A fresh component instance — a new conversation, a new tab — reads the
+  // same storage, so the badge stays away.
+  const second = await mountPill({ storage, fetchImpl })
+  try {
+    const tree = await settle(second)
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge came back after a remount')
+  } finally {
+    second.dispose()
+  }
+})
+
+test('a model added after the panel was opened brings the badge back', async () => {
+  const storage = createStorage()
+  let added = ['MiniMax-M2.5']
+  const pill = await mountPill({
+    storage,
+    fetchImpl: async (url, init) => {
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify({ ok: true, added: ['MiniMax-M3.1'] }), { status: 200 })
+      }
+      return new Response(JSON.stringify(addedPayload(added)), { status: 200 })
+    },
+  })
+  try {
+    let tree = await settle(pill)
+    assert.equal(textOf(byClass(tree, '__mmq_badge')), '1')
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    assert.equal(byClass(tree, '__mmq_badge'), undefined, 'the badge stayed after the panel opened')
+    // The Host adds a model; the panel's sync button asks for a fresh list.
+    added = ['MiniMax-M2.5', 'MiniMax-M3.1']
+    const syncButton = byClass(tree, '__mmq_syncButton')
+    assert.ok(syncButton !== undefined, 'the sync button did not render')
+    syncButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    await flush()
+    tree = pill.render()
+    const badge = byClass(tree, '__mmq_badge')
+    assert.ok(badge !== undefined, 'the badge did not come back for the new model')
+    // Only the model the user has not been told about counts.
+    assert.equal(textOf(badge), '1')
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('a storage that is missing or that throws does not break the plugin', async () => {
+  for (const mode of ['missing', 'throw', 'failing']) {
+    const storage = createStorage({ mode })
+    const pill = await mountPill({
+      storage,
+      fetchImpl: async () => new Response(JSON.stringify(addedPayload(['MiniMax-M2.5'])), { status: 200 }),
+    })
+    try {
+      let tree = await settle(pill)
+      // The pill renders…
+      assert.ok(byClass(tree, '__mmq_pill') !== undefined, `the pill did not render with the ${mode} storage`)
+      // …and the badge is still there, because nothing was remembered.
+      const badge = byClass(tree, '__mmq_badge')
+      assert.ok(badge !== undefined, `the badge did not render with the ${mode} storage`)
+      assert.equal(textOf(badge), '1')
+      // Opening the panel must not throw either.
+      byClass(tree, '__mmq_pill').props.onClick()
+      await flush()
+      tree = pill.render()
+      await flush()
+      tree = pill.render()
+      assert.ok(byClass(tree, '__mmq_panel') !== undefined, `the panel did not open with the ${mode} storage`)
+    } finally {
+      pill.dispose()
+    }
+  }
+})
+
+test('opening the panel reads the status once', async () => {
+  const requests = []
+  const pill = await mountPill({
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), method: init?.method ?? 'GET' })
+      return new Response(JSON.stringify(statusPayload()), { status: 200 })
+    },
+  })
+  try {
+    let tree = await settle(pill)
+    const before = requests.length
+    // Opening the panel is the moment the user wants the freshest reading.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    assert.equal(requests.length, before + 1, 'opening the panel did not read the status once')
+    // Closing it needs no reading: the panel is about to disappear.
+    byClass(tree, '__mmq_pill').props.onClick()
+    await flush()
+    tree = pill.render()
+    assert.equal(requests.length, before + 1, 'closing the panel read the status again')
   } finally {
     pill.dispose()
   }
