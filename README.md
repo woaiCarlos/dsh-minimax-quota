@@ -1,4 +1,4 @@
-# dsh-minimax
+# @woaicarlos/dsh-minimax
 
 在 DeepSeek Harness 的对话输入框下方，显示 **MiniMax 编程套餐（Coding Plan）剩余额度**：5 小时滚动窗口和周窗口各剩多少百分比。点击后弹出详情面板。同时，插件会探测 MiniMax 新发布的模型，把它们自动补进你的 pi-ai 模型列表。
 
@@ -12,7 +12,9 @@
 
 ## 安装
 
-插件通过 **GitHub 仓库**分发，不依赖 npm：
+插件通过 **GitHub 仓库**分发，不依赖 npm。包名是 `@woaicarlos/dsh-minimax`（npm 上的 `@woaicarlos`
+作用域尚未开通，这个名字先占住，将来真要发到 npm 时直接用）；**仓库名仍然是 `dsh-minimax-quota`** ——
+安装、克隆和社区目录条目用的都是仓库名，不受包名改动影响：
 
 ```bash
 dsh plugin --profile <你的 profile> add github:woaiCarlos/dsh-minimax-quota
@@ -81,6 +83,8 @@ DSH_MARKET_ON_DEMAND="$PWD/on-demand.json" node generate-index.mjs
 （`.github/workflows/publish.yml`），CI 里不保存任何长期 npm token：
 
 一次性配置（npmjs.com 的包设置页）：
+
+发布时用的包名是 `@woaicarlos/dsh-minimax`。
 
 | 字段 | 值 |
 | --- | --- |
@@ -166,7 +170,7 @@ minimax-cn  →  MINIMAX_CN_API_KEY
 ```yaml
 - insert:
     - id: minimax
-      name: 'dsh-minimax'
+      name: '@woaicarlos/dsh-minimax'
       config:
         credentialRef: MY_MINIMAX_KEY
 ```
@@ -220,6 +224,10 @@ MiniMax 已下线的模型只探测一次就记下结论，所以它不会每天
 
 `addedModels` 记着插件追加过哪些模型 —— **你手动删掉的模型因此不会被加回来**；`retiredModels` 记着 MiniMax 已经下线的模型。
 **删掉这个文件等于忘掉这些记录**：手动删掉的模型会在下次同步时重新出现，已下线的模型也会被重新探测一次。
+
+文件名里的 `dsh-minimax` 是**改包名之前的旧包名**，故意没有跟着改。这个文件是你自己的数据：
+一旦改名，插件就会读不到它，于是忘记自己追加过哪些模型，你手动删掉的模型会被悄悄加回来。
+换包名不会换这个文件，升级到新版本也不用改它。
 
 ### 数据来源
 

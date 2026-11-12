@@ -897,9 +897,9 @@ test('the daily sweep is registered as an effect of its own', async () => {
     // The startup attempt and the daily sweep are two separate effects, so
     // unloading the plugin cancels both of them.
     assert.deepEqual(ctx.effectLabels, [
-      'dsh-minimax: routes',
-      'dsh-minimax: first sync',
-      'dsh-minimax: daily sync',
+      '@woaicarlos/dsh-minimax: routes',
+      '@woaicarlos/dsh-minimax: first sync',
+      '@woaicarlos/dsh-minimax: daily sync',
     ])
   } finally {
     disposeAll(ctx)
@@ -928,7 +928,7 @@ test('the daily sweep runs one sync when the day elapses', async (t) => {
     await apply(ctx, {})
     // The startup attempt is called off, so the only sync that can run is
     // the daily sweep.
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
 
     // The day has not passed yet, so nothing has run.
     t.mock.timers.tick(DAY_MS - 1)
@@ -979,7 +979,7 @@ test('a second sweep does not probe a model the plugin already added', async (t)
   }
   try {
     await apply(ctx, {})
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
 
     // The first sweep measures the model MiniMax offers and adds it.
     t.mock.timers.tick(DAY_MS)
@@ -1108,7 +1108,7 @@ test('the daily sweep stops when the plugin is disposed while it is running', as
     await apply(ctx, {})
     // The startup attempt is called off, so the only sync that can run is
     // the daily sweep.
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
     t.mock.timers.tick(DAY_MS)
     await waitUntil(() => requests.includes('probe'))
 
@@ -1240,7 +1240,7 @@ test('a retired model is probed once and then remembered', async (t) => {
   }
   try {
     await apply(ctx, {})
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
 
     // The first sweep meets the retired model and probes it.
     t.mock.timers.tick(DAY_MS)
@@ -1283,13 +1283,13 @@ test('the daily sweep leaves one line on the Host log', async (t) => {
   globalThis.fetch = fakeFetch
   try {
     await apply(ctx, {})
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
     t.mock.timers.tick(DAY_MS)
     await waitUntil(() => dailyTimers(watcher).length === 2)
     // The line says how many models were added, so a day that added three
     // does not read like a day that added none.
     assert.equal(ctx.infos.length, 1)
-    assert.equal(ctx.infos[0][1], 'dsh-minimax: the daily sync added')
+    assert.equal(ctx.infos[0][1], '@woaicarlos/dsh-minimax: the daily sync added')
     assert.equal(ctx.infos[0][2], 1)
   } finally {
     globalThis.fetch = originalFetch
@@ -1315,7 +1315,7 @@ test('the startup sync leaves one line on the Host log', async (t) => {
     // The first attempt waits two seconds before it runs.
     t.mock.timers.tick(2000)
     await waitUntil(() => ctx.infos.length > 0)
-    assert.equal(ctx.infos[0][1], 'dsh-minimax: the startup sync added')
+    assert.equal(ctx.infos[0][1], '@woaicarlos/dsh-minimax: the startup sync added')
     // The line says how many models were added.
     assert.equal(ctx.infos[0][2], 1)
   } finally {
@@ -1341,7 +1341,7 @@ test('the manual sync leaves one line on the Host log', async () => {
     const res = fakeResponse()
     await sync.handler(fakeRequest('POST'), res)
     assert.equal(ctx.infos.length, 1)
-    assert.equal(ctx.infos[0][1], 'dsh-minimax: the manual sync added')
+    assert.equal(ctx.infos[0][1], '@woaicarlos/dsh-minimax: the manual sync added')
     // The line says how many models were added.
     assert.equal(ctx.infos[0][2], 1)
   } finally {
@@ -1401,10 +1401,10 @@ test('the config schema describes itself for the settings service', async () => 
   // and the row stays invisible in the Settings UI.
   assert.equal(typeof Config.toJSON, 'function')
   const json = Config.toJSON()
-  assert.equal(json.uid, 'dsh-minimax.config')
-  assert.equal(json.refs[json.uid].dict.credentialRef, 'dsh-minimax.credentialRef')
+  assert.equal(json.uid, '@woaicarlos/dsh-minimax.config')
+  assert.equal(json.refs[json.uid].dict.credentialRef, '@woaicarlos/dsh-minimax.credentialRef')
   // The field is volatile, so it can be edited without remounting the plugin.
-  assert.equal(json.refs['dsh-minimax.credentialRef'].meta.volatile, true)
+  assert.equal(json.refs['@woaicarlos/dsh-minimax.credentialRef'].meta.volatile, true)
   // Every reference the description names has to exist, or the service
   // cannot rebuild the schema.
   for (const ref of Object.values(json.refs)) {

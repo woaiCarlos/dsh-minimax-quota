@@ -1,6 +1,6 @@
 {
-  "name": "dsh-minimax",
-  "version": "1.1.0",
+  "name": "@woaicarlos/dsh-minimax",
+  "version": "1.1.2",
   "description": "Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile's MiniMax model list current by appending newly released models.",
   "keywords": [
     "dsh",

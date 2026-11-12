@@ -40,8 +40,9 @@ jobs:
           node -e "
             const fs = require('fs');
             const text = fs.readFileSync('cordis.patch.yml', 'utf8');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             if (!/^\s*-\s*insert:/m.test(text)) throw new Error('patch has no insert list');
-            if (!/name:\s*'dsh-minimax'/.test(text)) throw new Error('patch does not insert this package');
+            if (!text.includes(\"name: '\" + pkg.name + \"'\")) throw new Error('patch does not insert this package (' + pkg.name + ')');
             console.log('ok cordis.patch.yml');
           "
 

@@ -324,7 +324,7 @@ async function loadClient({ storage } = {}) {
   const evaluate = new Function('window', 'document', source)
   evaluate(fakeWindow, fakeDocument)
   assert.ok(captured !== null, 'the client half did not register itself')
-  assert.equal(captured.id, 'dsh-minimax')
+  assert.equal(captured.id, '@woaicarlos/dsh-minimax')
   return { module: captured, window: fakeWindow }
 }
 

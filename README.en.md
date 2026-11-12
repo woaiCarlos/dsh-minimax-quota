@@ -1,4 +1,4 @@
-# dsh-minimax
+# @woaicarlos/dsh-minimax
 
 Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness chat composer: how much is left in the rolling 5-hour window and in the weekly window. Click the pill for the details. It also watches for models MiniMax has just released and appends them to your pi-ai model list.
 
@@ -12,7 +12,11 @@ Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness cha
 
 ## Install
 
-The plugin is distributed from **this Git repository**, not from npm:
+The plugin is distributed from **this Git repository**, not from npm. The package name is
+`@woaicarlos/dsh-minimax` (the `@woaicarlos` scope does not exist on npm yet — the name is reserved
+for it, and a future registry release would use it as it stands); **the repository name is still
+`dsh-minimax-quota`** — installing, cloning and the community catalog entry all name the repository,
+so the package rename leaves them alone:
 
 ```bash
 dsh plugin --profile <your profile> add github:woaiCarlos/dsh-minimax-quota
@@ -75,6 +79,8 @@ The repository already carries npm's official **trusted publishing (OIDC)** work
 (`.github/workflows/publish.yml`), which keeps no long-lived npm token in CI.
 
 One-time setup (the package settings page on npmjs.com):
+
+The package name a release would go out under is `@woaicarlos/dsh-minimax`.
 
 | Field | Value |
 | --- | --- |
@@ -160,7 +166,7 @@ If your key lives under another environment variable name, change the plugin con
 ```yaml
 - insert:
     - id: minimax
-      name: 'dsh-minimax'
+      name: '@woaicarlos/dsh-minimax'
       config:
         credentialRef: MY_MINIMAX_KEY
 ```
@@ -209,6 +215,11 @@ The plugin's bookkeeping lives in one file inside the profile directory, not in 
 ```
 
 `addedModels` holds the models the plugin appended — which is why **a model you deleted by hand does not come back**; `retiredModels` holds the models MiniMax has retired. **Deleting this file throws those records away**: a model you removed by hand will reappear on the next sync, and a retired model will be probed once more.
+
+The `dsh-minimax` in the file name is the **old package name**, left as it is on purpose. This file is
+your own data: renaming it would make the plugin lose track of which models it added, and a model you
+deleted by hand would quietly come back. Renaming the package does not rename this file, and upgrading
+to the new version does not ask you to rename it either.
 
 ### Where the data comes from
 

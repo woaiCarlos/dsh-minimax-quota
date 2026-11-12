@@ -10,7 +10,7 @@
  * talks to those routes.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-minimax',
+  id: '@woaicarlos/dsh-minimax',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -127,7 +127,7 @@ window.__ModuleLoader__.load({
       const tagId = 'dsh-minimax/client.css'
       if (document.querySelector(`style[data-plugin-css=${JSON.stringify(tagId)}]`) !== null) return
       const tag = document.createElement('style')
-      tag.dataset.plugin = 'dsh-minimax'
+      tag.dataset.plugin = '@woaicarlos/dsh-minimax'
       tag.dataset.pluginCss = tagId
       tag.textContent = CSS
       document.head.appendChild(tag)

@@ -1,5 +1,5 @@
 - insert:
     - id: minimax
-      name: 'dsh-minimax'
+      name: '@woaicarlos/dsh-minimax'
       config:
         credentialRef: MINIMAX_CN_API_KEY
