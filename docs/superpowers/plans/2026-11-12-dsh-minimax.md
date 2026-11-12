@@ -1251,7 +1251,7 @@ Create `test/model-entry.test.js`:
 ```js
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildModelEntry } from '../lib/model-entry.js'
+import { FALLBACK_EFFORT_LEVELS, buildModelEntry } from '../lib/model-entry.js'
 import { lookupSpec } from '../lib/specs.js'
 
 test('a thinking model declares the effort levels and adaptive thinking', () => {
@@ -1293,6 +1293,42 @@ test('an entry only carries modalities pi-ai accepts', () => {
     reasoningOptions: null,
   })
   assert.deepEqual(entry.input, ['text', 'image'])
+})
+
+test('a budget-mode model offers only the levels budget mode can tell apart', () => {
+  const entry = buildModelEntry('MiniMax-M3', { maxTokens: 524288, supportsThinking: true }, {
+    contextWindow: 1000000,
+    outputLimit: 524288,
+    modalities: ['text', 'image'],
+    reasoningOptions: { type: 'toggle' },
+  })
+  assert.deepEqual(Object.keys(entry.reasoningEfforts), ['low', 'medium', 'high'])
+  assert.equal(entry.compat, undefined)
+})
+
+test('an adaptive model keeps the levels its snapshot records', () => {
+  const entry = buildModelEntry('MiniMax-M3.1-Flash', { maxTokens: 524288, supportsThinking: true }, {
+    contextWindow: 1000000,
+    outputLimit: 524288,
+    modalities: ['text', 'image'],
+    reasoningOptions: { type: 'effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  })
+  assert.deepEqual(Object.keys(entry.reasoningEfforts), ['low', 'medium', 'high', 'xhigh', 'max'])
+  assert.deepEqual(entry.compat, { forceAdaptiveThinking: true })
+})
+
+test('a degenerate measured cap falls back to the snapshot', () => {
+  const entry = buildModelEntry('MiniMax-M3', { maxTokens: 0, supportsThinking: false }, {
+    contextWindow: 1000000,
+    outputLimit: 524288,
+    modalities: ['text', 'image'],
+    reasoningOptions: { type: 'toggle' },
+  })
+  assert.equal(entry.maxTokens, 524288)
+})
+
+test('the fallback levels are the ones budget mode distinguishes', () => {
+  assert.deepEqual(FALLBACK_EFFORT_LEVELS, ['low', 'medium', 'high'])
 })
 
 test('a model that does not think turns reasoning off', () => {
@@ -1340,17 +1376,19 @@ Expected: FAIL with `Cannot find module '../lib/model-entry.js'`
 import { SUPPORTED_MODALITIES, lookupSpec } from './specs.js'
 
 /**
- * The effort levels offered for a model the snapshot says nothing about.
+ * The effort levels offered for a model that is called in budget mode.
  *
- * pi-ai maps a level onto a thinking budget when the model is called in
- * budget mode, and onto `output_config.effort` when the model is called in
- * adaptive mode. Either way a level needs a wire spelling, and the ones
- * below are the spellings MiniMax accepts.
+ * pi-ai maps a level onto a thinking token budget when the model is called
+ * in budget mode, and onto `output_config.effort` when the model is called
+ * in adaptive mode. In budget mode pi-ai clamps `xhigh` and `max` down to
+ * `high`, so offering those two would put two identical choices in the
+ * picker. The levels below are the ones budget mode can tell apart.
  *
- * A model whose snapshot entry records its own levels uses those instead —
- * they are the upstream's statement of what it accepts, and they win.
+ * A model called in adaptive mode uses the levels its snapshot entry
+ * records instead — they are the upstream's statement of what it accepts,
+ * and in adaptive mode they pass through unchanged.
  */
-export const FALLBACK_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
+export const FALLBACK_EFFORT_LEVELS = ['low', 'medium', 'high']
 
 /**
  * Build the pi-ai entry for one model.
@@ -1369,13 +1407,25 @@ export function buildModelEntry(modelId, probe, spec = lookupSpec(modelId)) {
     id: modelId,
     name: modelId,
     contextWindow: spec.contextWindow,
-    maxTokens: probe.maxTokens ?? spec.outputLimit,
+    maxTokens: spec.outputLimit,
     input: spec.modalities.filter((modality) => SUPPORTED_MODALITIES.includes(modality)),
   }
+  // pi-ai refuses a model whose maxTokens is not a positive integer, and a
+  // catalogue that fails takes its whole provider out of every picker, so a
+  // degenerate measurement falls back to the snapshot's cap.
+  const measured = probe.maxTokens
+  if (Number.isInteger(measured) && measured > 0) entry.maxTokens = measured
   if (probe.supportsThinking === true) {
-    const levels = spec.reasoningOptions?.values ?? FALLBACK_EFFORT_LEVELS
+    // The levels an entry may offer are the ones its wire format can tell
+    // apart. In adaptive mode pi-ai sends the level as `output_config.effort`
+    // and the snapshot's own list passes through unchanged. In budget mode
+    // pi-ai clamps `xhigh` and `max` to `high`, so offering them would put
+    // two identical choices in the picker.
+    const adaptive = spec.reasoningOptions?.type === 'effort'
+    const declared = adaptive ? spec.reasoningOptions?.values ?? [] : []
+    const levels = declared.length > 0 ? declared : FALLBACK_EFFORT_LEVELS
     entry.reasoningEfforts = Object.fromEntries(levels.map((level) => [level, level]))
-    if (spec.reasoningOptions?.type === 'effort') {
+    if (adaptive) {
       entry.compat = { forceAdaptiveThinking: true }
     }
   } else {
@@ -1407,7 +1457,7 @@ test('the modality list cannot be mutated', () => {
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `node --test test/model-entry.test.js`
-Expected: PASS — 10 tests.
+Expected: PASS — 14 tests.
 
 - [ ] **Step 6: Commit**
 
