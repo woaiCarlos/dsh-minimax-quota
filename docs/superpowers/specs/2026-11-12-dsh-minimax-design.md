@@ -214,6 +214,7 @@ dsh-minimax
 │   ├── probeMaxTokens()    POST /anthropic/v1/messages       （超限 → 免费读上限）
 │   ├── probeThinking()     POST /anthropic/v1/messages       （是否思考）
 │   ├── MODEL_SPECS         内置快照：contextWindow / 模态 / reasoning_options
+│   ├── 状态文件            <profileDir>/dsh-minimax-state.json（插件自己的簿记）
 │   └── syncModels()        仅追加 → settings.write('llm-pi-ai')
 ├── client.js   浏览器半侧
 │   ├── 额度药丸 + 点击详情面板                                （现有）
@@ -360,7 +361,7 @@ pi-ai 的 `MODALITIES` 只接受 `text` 和 `image`
 与「已有列表 + 新条目」逐字段比较
   ├─ 完全相同 → 不写，不动任何文件
   └─ 有差异   → settings.write('llm-pi-ai', …, revision, ['providers','minimax-cn','models'])
-                并把新 id 记入 config.addedModels（经 configEditor.edit 写入）
+                并把新 id 记入插件自己的状态文件（见 §8.2）
 ```
 
 ### 6.1 「只增不删」带来的两个推论
@@ -425,15 +426,24 @@ DSH 没有给插件用的 toast 服务（`toast` 相关命中全是 CSS 变量�
 
 ### 8.2 插件自己的状态
 
-插件用自己那一行存状态（`config.addedModels`），经 `ctx.configEditor.edit()` 写入 profile patch：
+插件把「自己添加过哪些 id」记在 profile 目录下的一个状态文件里：
+
+```
+<profileDir>/dsh-minimax-state.json
+{ "addedModels": ["MiniMax-M3.1-Flash"], "lastSyncAt": 1760000000000 }
+```
+
+> **为什么不用 `configEditor.edit()` 写插件自己那一行**：改插件自己的行会触发 Loader
+> reconcile，把插件重新加载，于是写入逻辑会再次进入 `apply()`。状态文件让插件的簿记
+> 完全不落在用户的 profile patch 里 —— 这正是原本想要的效果。
+
+插件自己的 profile 行仍然只有一行凭据引用：
 
 ```yaml
 - id: minimax
   name: "dsh-minimax"
   config:
     credentialRef: MINIMAX_CN_API_KEY
-    addedModels:
-      - MiniMax-M3.1-Flash
 ```
 
 ### 8.3 凭据安全
