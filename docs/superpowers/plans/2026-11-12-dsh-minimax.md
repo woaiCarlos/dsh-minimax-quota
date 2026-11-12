@@ -3922,8 +3922,11 @@ In `client.js`, add a component right after `QuotaPanel`:
      *
      * The section shows even when no model has been synced yet, so the sync
      * button is reachable in exactly the state where it is most useful.
+     *
+     * The section is absent when the status route did not answer, so the
+     * line that reports a failed manual sync belongs to the panel.
      */
-    function ModelsPanel({ models, t, onSync, syncing, syncError }) {
+    function ModelsPanel({ models, t, onSync, syncing }) {
       if (models === undefined) return null
       const synced = Array.isArray(models.synced) ? models.synced : []
       const added = Array.isArray(models.added) ? models.added : []
@@ -3938,7 +3941,6 @@ In `client.js`, add a component right after `QuotaPanel`:
           ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
           : null,
         models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
-        syncError ? h('div', { className: '__mmq_error' }, syncError) : null,
         onSync
           ? h('button', {
               className: '__mmq_syncButton',
@@ -4032,9 +4034,12 @@ In `locale/en.json`, add the same keys in English:
 - [ ] **Step 6: Add the manual sync button**
 
 The design calls for a manual sync in the panel, beside the list of synced models, and the Host
-already answers `POST /plugin/minimax/sync`. The button asks for a sync and does not wait for it
-to finish: the sync probes the candidates MiniMax offers, which can take a while, and the status
-poll refreshes the list when it lands.
+already answers `POST /plugin/minimax/sync`. The button asks for a sync and waits for the answer:
+the sync probes the candidates MiniMax offers, which can take a while, so the button says that it
+is running while it waits. The status route is read again as soon as the POST resolves, so the list
+catches up without waiting for the next poll. The Host answers HTTP 200 with `{"ok":false}` when the
+sync failed, so the payload — not the status code — is what says whether the sync worked, and a
+failure leaves an error line in the panel.
 
 Add the route next to the status route in `client.js`:
 
@@ -4100,16 +4105,38 @@ The failure line is a locale string, so the panel never shows an internal reason
     }
 ```
 
-Pass them to the panel:
+Pass them to the panel. The failure line belongs to the panel and not to the models section: the
+section is absent when the status route did not answer, and a failed manual sync has to reach the
+user even then.
 
 ```js
-h(ModelsPanel, { models, t, onSync: syncNow, syncing, syncError }),
+              h(QuotaPanel, {
+                view,
+                models,
+                t,
+                style: position ?? { position: 'fixed', left: '-9999px', top: '-9999px' },
+                panelRef: panelNodeRef,
+                onSync: syncNow,
+                syncing,
+                syncError,
+              }),
 ```
 
-And let the panel draw the button, under the synced-at line:
+The panel draws the line right below the models section:
 
 ```js
-function ModelsPanel({ models, t, onSync, syncing, syncError }) {
+        h('div', { className: '__mmq_rows' }, rows),
+        h(ModelsPanel, { models, t, onSync, syncing }),
+        // The sync failure belongs to the panel and not to the models
+        // section: the section disappears when the status route did not
+        // answer, and a failed manual sync has to reach the user even then.
+        syncError ? h('div', { className: '__mmq_error', style: { marginTop: '8px' } }, syncError) : null,
+```
+
+And let the models section draw the button, under the synced-at line:
+
+```js
+function ModelsPanel({ models, t, onSync, syncing }) {
 ```
 
 ```js
@@ -4595,6 +4622,46 @@ test('a failed manual sync shows an error line in the panel', async () => {
   }
 })
 
+test('a failed manual sync stays visible when the status route also fails', async () => {
+  let syncFailed = false
+  const pill = await mountPill({
+    fetchImpl: async (url, init) => {
+      if (init?.method === 'POST') {
+        syncFailed = true
+        // The Host answers HTTP 200 with a payload that says the sync failed.
+        return new Response(JSON.stringify({ ok: false, reason: 'sync-failed' }), { status: 200 })
+      }
+      // The status route fails once the sync failed, so the models section
+      // is gone and the panel keeps only the quota's error row.
+      if (syncFailed) return new Response('nope', { status: 500 })
+      return new Response(JSON.stringify(statusPayload()), { status: 200 })
+    },
+  })
+  try {
+    let tree = await settle(pill)
+    const pillButton = byClass(tree, '__mmq_pill')
+    assert.ok(pillButton !== undefined, 'the pill did not render')
+    pillButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    const syncButton = byClass(tree, '__mmq_syncButton')
+    assert.ok(syncButton !== undefined, 'the sync button did not render')
+    syncButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    // The models section is gone, because the status route did not answer.
+    assert.equal(byClass(tree, '__mmq_models'), undefined)
+    // The failed sync still has to reach the user.
+    const errors = nodes(tree).filter((node) => node.props?.className === '__mmq_error')
+    assert.ok(
+      errors.some((node) => textOf(node).includes('modelsSyncFailed')),
+      'the failed sync left no error line',
+    )
+  } finally {
+    pill.dispose()
+  }
+})
+
 test('the panel opens when the quota could not be read', async () => {
   const pill = await mountPill({
     fetchImpl: async () => new Response(JSON.stringify(statusPayload({ ok: false })), { status: 200 }),
@@ -4680,9 +4747,10 @@ test('the locale dictionaries and the locale files carry the same keys', async (
 })
 ```
 
-The three tests cover the three things a user would notice: a failed manual sync leaves an error line
-in the panel, the panel opens even when the quota could not be read, and a successful manual sync
-refreshes the model list right away instead of waiting for the next poll.
+The four tests cover the four things a user would notice: a failed manual sync leaves an error line
+in the panel, that line survives a status route that failed as well, the panel opens even when the
+quota could not be read, and a successful manual sync refreshes the model list right away instead of
+waiting for the next poll.
 
 - [ ] **Step 9: Run the checks**
 
@@ -4734,17 +4802,22 @@ In `package.json`, change `"name": "dsh-minimax-quota"` to `"name": "dsh-minimax
 Bump the version to `1.1.0`.
 
 The `files` array must ship every runtime import — `lib/`, the locale files, the icon, the patch — and
-nothing else. npm always leaves `package-lock.json` out of a tarball, and the plan and the design
-document are not runtime files:
+every file the READMEs link relatively, and nothing else. npm always leaves `package-lock.json` out of
+a tarball, and the plan and the design document are not runtime files. The relative links are the two
+images and the catalog entry, so the array names those three paths one by one rather than the
+directories they live in — `docs/` also holds the plan and the design document:
 
 ```json
   "files": [
     "LICENSE",
     "README.en.md",
     "README.md",
+    "catalog/awesome-dsh-plugin.yml",
     "client.js",
     "cordis.patch.yml",
     "dsh-plugin.json",
+    "docs/market-entry.png",
+    "docs/screenshot-panel.png",
     "icon.svg",
     "index.js",
     "lib",
