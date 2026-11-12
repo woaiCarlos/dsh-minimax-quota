@@ -3,8 +3,52 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, buildStatusPayload, runSync } from '../index.js'
+import { Config, apply, buildStatusPayload, inject, runSync } from '../index.js'
 import { STATE_FILENAME } from '../lib/state.js'
+
+/**
+ * The defaults the pi-ai schema materialises into a provider route.
+ *
+ * The real service answers with the schema-resolved map, so a route that
+ * the user configured without them carries them anyway.
+ */
+const ROUTE_DEFAULTS = {
+  defaultContextWindow: 1000000,
+  defaultMaxTokens: 128000,
+  defaultInput: ['text'],
+}
+
+/** The default the pi-ai schema materialises into every model entry. */
+const MODEL_DEFAULTS = { compat: {} }
+
+/**
+ * Resolve one provider route the way the pi-ai schema does.
+ *
+ * @param route - the route as it was written.
+ * @returns the resolved route.
+ */
+function resolveRoute(route) {
+  if (route === null || typeof route !== 'object') return route
+  const resolved = { ...route, ...ROUTE_DEFAULTS }
+  if (Array.isArray(route.models)) {
+    resolved.models = route.models.map((entry) => (
+      entry !== null && typeof entry === 'object' ? { ...entry, ...MODEL_DEFAULTS } : entry
+    ))
+  }
+  return resolved
+}
+
+/**
+ * Resolve a provider map the way the pi-ai schema does.
+ *
+ * @param providers - the map as it was written.
+ * @returns the resolved map.
+ */
+function resolveProviders(providers) {
+  const resolved = {}
+  for (const [id, route] of Object.entries(providers ?? {})) resolved[id] = resolveRoute(route)
+  return resolved
+}
 
 /**
  * A stand-in for the Host settings service.
@@ -12,24 +56,59 @@ import { STATE_FILENAME } from '../lib/state.js'
  * The service holds two layers: the profile override, which a write replaces,
  * and the inherited layer, which holds the provider map when the user
  * configured it there instead of in the profile. The write is handed the
- * override's projection and its result is merged over the override with the
- * volatile fields stripped, so the `providers` map a write carries replaces
- * the inherited one outright.
+ * current projection, the inherited projection and the schema, and its result
+ * replaces the whole `providers` map, so a route that only an inherited layer
+ * configures is lost when the written map does not carry it.
  *
- * @param options - `{ providers, override }`; `override` defaults to the
- *   effective provider map, and `{}` models an override that holds none.
+ * The effective projection the service answers with is the schema-resolved
+ * one: every route and every model entry carries the defaults the pi-ai
+ * schema materialises. The fake resolves its map the same way, so a test sees
+ * what the service really answers — a materialised default on an entry the
+ * user wrote. The override the service answers with is the raw profile row,
+ * which carries the entries exactly as the user wrote them.
+ *
+ * @param options - `{ providers, override }`; `providers` is the inherited
+ *   layer's map, and `override` is the raw profile row, which defaults to a
+ *   row holding the same map.
  * @returns the settings fake.
  */
 function fakeSettings({ providers = {}, override } = {}) {
   const writes = []
-  const current = override ?? { providers }
+  const state = {
+    revision: 3,
+    inherited: providers,
+    override: override ?? { providers },
+  }
+
+  /**
+   * The provider map the effective projection holds.
+   *
+   * The loader merges the layers shallowly, so an override that carries a
+   * provider map replaces the inherited one.
+   *
+   * @returns the effective map.
+   */
+  const effectiveProviders = () => {
+    const own = state.override?.providers
+    const base = state.inherited ?? {}
+    if (own !== null && typeof own === 'object') return { ...base, ...own }
+    return base
+  }
+
   return {
     writes,
     describe() {
       return [{
         ns: 'llm-pi-ai',
-        revision: 3,
-        value: { providers },
+        // The revision moves when the profile changes, so a write that
+        // carries a stale one cannot pass unnoticed.
+        revision: state.revision,
+        value: { providers: resolveProviders(effectiveProviders()) },
+        // The override is the raw profile row: the entries carry the wording
+        // the user wrote, with no default materialised into them.
+        user: state.override?.providers === undefined
+          ? {}
+          : { providers: state.override.providers },
       }]
     },
     async write(ns, change, expected, paths) {
@@ -42,13 +121,28 @@ function fakeSettings({ providers = {}, override } = {}) {
           throw new TypeError('settings.write expects a list of field paths')
         }
       }
-      writes.push({ ns, expected, paths, next: change(current) })
+      // The service hands the change the current projection, the inherited
+      // one and the schema.
+      const next = change(
+        { providers: resolveProviders(effectiveProviders()) },
+        { providers: resolveProviders(state.inherited) },
+        { type: 'object' },
+      )
+      writes.push({ ns, expected, paths, next })
+      // The write replaces the volatile map in the override, and the
+      // revision moves with it.
+      state.override = { ...state.override, providers: next.providers }
+      state.revision += 1
     },
   }
 }
 
 /**
  * A Host context with the services the plugin uses.
+ *
+ * The logger records every level the Host offers, so a test can reach the
+ * lines the plugin writes. A logger with only `error` would silently skip
+ * every `info` and `warn` line, and no test could see them.
  *
  * @param options - `{ settings, profileDir, webServer }`.
  * @returns the fake context.
@@ -57,14 +151,24 @@ function ctxWith({ settings, profileDir = '/tmp/dsh-minimax-test', webServer } =
   const effects = []
   const effectLabels = []
   const logs = []
+  const infos = []
+  const warns = []
   return {
     settings,
     effects,
     effectLabels,
     logs,
+    infos,
+    warns,
     logger: {
       error(...args) {
         logs.push(args)
+      },
+      info(...args) {
+        infos.push(args)
+      },
+      warn(...args) {
+        warns.push(args)
       },
     },
     get(name) {
@@ -278,7 +382,47 @@ test('runSync appends a newly released model and leaves the rest alone', async (
   assert.equal(written[1].maxTokens, 524288)
   // The rest of the route survives, and so does every other provider.
   assert.equal(write.next.providers['minimax-cn'].apiKeyEnv, 'MINIMAX_CN_API_KEY')
-  assert.deepEqual(write.next.providers['other-route'], { apiKeyEnv: 'OTHER_API_KEY' })
+  assert.equal(write.next.providers['other-route'].apiKeyEnv, 'OTHER_API_KEY')
+})
+
+test('the written entry keeps the wording the user wrote', async () => {
+  // The effective projection is the schema-resolved one, so the entry the
+  // user wrote carries a materialised `compat` block there. The override is
+  // the raw profile row, so the entry the user wrote is there as it was.
+  const userEntry = { id: 'MiniMax-M3', name: 'MiniMax-M3-1M', maxTokens: 512000 }
+  const settings = fakeSettings({
+    providers: {
+      'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [userEntry] },
+      'other-route': { apiKeyEnv: 'OTHER_API_KEY' },
+    },
+    override: {
+      providers: {
+        'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [userEntry] },
+      },
+    },
+  })
+  // The service really answers with a materialised default on the entry.
+  const descriptor = settings.describe()[0]
+  assert.deepEqual(descriptor.value.providers['minimax-cn'].models[0].compat, {})
+  const ctx = ctxWith({ settings })
+  const result = await runSync(ctx, {
+    credentialRef: 'MINIMAX_CN_API_KEY',
+    profileDir: '/tmp/dsh-minimax-test',
+    fetchImpl: fakeFetch,
+    stateReader: async () => ({ addedModels: [], lastSyncAt: null }),
+    stateWriter: async () => {},
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.added, ['MiniMax-M3.1-Flash'])
+  assert.equal(settings.writes.length, 1)
+  const written = settings.writes[0].next.providers['minimax-cn'].models
+  // The entry the user wrote is written back exactly as it was: no
+  // materialised default, no changed value, no new order.
+  assert.deepEqual(written[0], userEntry)
+  // The new model is appended behind it.
+  assert.equal(written[1].id, 'MiniMax-M3.1-Flash')
+  // The sibling route from the inherited layer survives the write.
+  assert.equal(settings.writes[0].next.providers['other-route'].apiKeyEnv, 'OTHER_API_KEY')
 })
 
 test('runSync keeps a route that only an inherited layer configures', async () => {
@@ -310,7 +454,7 @@ test('runSync keeps a route that only an inherited layer configures', async () =
   // Its model list is the one the sync planned.
   assert.deepEqual(written['minimax-cn'].models.map((entry) => entry.id), ['MiniMax-M3', 'MiniMax-M3.1-Flash'])
   // The sibling route is not lost either.
-  assert.deepEqual(written['other-route'], { apiKeyEnv: 'OTHER_API_KEY' })
+  assert.equal(written['other-route'].apiKeyEnv, 'OTHER_API_KEY')
 })
 
 test('runSync still succeeds when the state cannot be written', async () => {
@@ -835,3 +979,216 @@ test('the pending daily timer does not hold the process open', async () => {
   }
 })
 
+
+/**
+ * A fetch that answers like MiniMax does for a model it has retired.
+ *
+ * MiniMax validates `max_tokens` before it checks whether the model still
+ * exists, so the cap request answers with a cap and only the next request
+ * says the model is gone. A retired model therefore costs two requests.
+ */
+const RETIRED_FETCH = async (_url, init) => {
+  const body = JSON.parse(init.body)
+  if (body.max_tokens === 999999999) {
+    return new Response(JSON.stringify({ error: { message: 'invalid params, model[MiniMax-M2] does not support max tokens > 131072 (2013)' } }), { status: 400 })
+  }
+  return new Response(JSON.stringify({ error: { message: 'The model "MiniMax-M2" is no longer available. (2069)' } }), { status: 400 })
+}
+
+test('a retired model is probed once and then remembered', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-retired-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  let modelLists = 0
+  let probes = 0
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      modelLists += 1
+      // MiniMax keeps listing the model it has retired.
+      return new Response(JSON.stringify({ data: [{ id: 'MiniMax-M2' }] }), { status: 200 })
+    }
+    probes += 1
+    return RETIRED_FETCH(url, init)
+  }
+  try {
+    await apply(ctx, {})
+    disposeEffect(ctx, 'dsh-minimax: first sync')
+
+    // The first sweep meets the retired model and probes it.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 2)
+    assert.equal(modelLists, 1)
+    // The cap request and the request that says the model is gone.
+    assert.equal(probes, 2)
+    // A retired model is never written into the profile.
+    assert.equal(settings.writes.length, 0)
+    // The decision is remembered.
+    const state = JSON.parse(await readFile(join(profileDir, STATE_FILENAME), 'utf8'))
+    assert.deepEqual(state.retiredModels, ['MiniMax-M2'])
+
+    // The next sweep costs one model-list request and no probe at all: the
+    // model MiniMax retired is not a candidate any more.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 3)
+    assert.equal(modelLists, 2)
+    assert.equal(probes, 2)
+    assert.equal(settings.writes.length, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the daily sweep leaves one line on the Host log', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-daily-log-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fakeFetch
+  try {
+    await apply(ctx, {})
+    disposeEffect(ctx, 'dsh-minimax: first sync')
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 2)
+    // The line says how many models were added, so a day that added three
+    // does not read like a day that added none.
+    assert.equal(ctx.infos.length, 1)
+    assert.equal(ctx.infos[0][1], 'dsh-minimax: the daily sync added')
+    assert.equal(ctx.infos[0][2], 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the startup sync leaves one line on the Host log', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-startup-log-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fakeFetch
+  try {
+    await apply(ctx, {})
+    // The first attempt waits two seconds before it runs.
+    t.mock.timers.tick(2000)
+    await waitUntil(() => ctx.infos.length > 0)
+    assert.equal(ctx.infos[0][1], 'dsh-minimax: the startup sync added')
+    // The line says how many models were added.
+    assert.equal(ctx.infos[0][2], 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the manual sync leaves one line on the Host log', async () => {
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-manual-log-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fakeFetch
+  try {
+    await apply(ctx, {})
+    const sync = webServer.registered.find((route) => route.path === '/plugin/minimax/sync')
+    const res = fakeResponse()
+    await sync.handler(fakeRequest('POST'), res)
+    assert.equal(ctx.infos.length, 1)
+    assert.equal(ctx.infos[0][1], 'dsh-minimax: the manual sync added')
+    // The line says how many models were added.
+    assert.equal(ctx.infos[0][2], 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+  }
+})
+
+test('a failed startup sync is not swallowed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const webServer = fakeWebServer()
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  settings.write = async () => {
+    throw new Error('settings namespace "llm-pi-ai" changed since it was read')
+  }
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-startup-fail-'))
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fakeFetch
+  try {
+    await apply(ctx, {})
+    t.mock.timers.tick(2000)
+    await waitUntil(() => ctx.logs.length > 0)
+    // The failure reaches the Host log instead of disappearing into an
+    // empty catch.
+    assert.equal(ctx.logs[0].some((arg) => arg instanceof Error && arg.message.includes('changed since it was read')), true)
+  } finally {
+    globalThis.fetch = originalFetch
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the plugin declares the profile context it reads its state from', async () => {
+  // Without the service the fallbacks would swap in a no-op state reader and
+  // writer, and a model the user deleted by hand would come back.
+  assert.deepEqual(inject, ['webServer', 'credentials', 'settings', 'profileContext'])
+})
+
+test('the config refuses a credential reference the credentials service cannot resolve', async () => {
+  // The credentials service only recognises a reference that is a shell
+  // identifier, so anything else resolves to nothing.
+  const refused = Config['~standard'].validate({ credentialRef: 'sk-example-key' })
+  assert.equal(Array.isArray(refused.issues), true)
+  assert.equal(refused.issues.length, 1)
+  assert.equal(refused.issues[0].path[0], 'credentialRef')
+  const accepted = Config['~standard'].validate({ credentialRef: 'MINIMAX_CN_API_KEY' })
+  assert.equal(accepted.value.credentialRef, 'MINIMAX_CN_API_KEY')
+})
+
+test('the config schema describes itself for the settings service', async () => {
+  // Without a description the settings service finds no form for this row,
+  // and the row stays invisible in the Settings UI.
+  assert.equal(typeof Config.toJSON, 'function')
+  const json = Config.toJSON()
+  assert.equal(json.uid, 'dsh-minimax.config')
+  assert.equal(json.refs[json.uid].dict.credentialRef, 'dsh-minimax.credentialRef')
+  // The field is volatile, so it can be edited without remounting the plugin.
+  assert.equal(json.refs['dsh-minimax.credentialRef'].meta.volatile, true)
+  // Every reference the description names has to exist, or the service
+  // cannot rebuild the schema.
+  for (const ref of Object.values(json.refs)) {
+    for (const child of Object.values(ref.dict ?? {})) {
+      assert.ok(json.refs[child] !== undefined)
+    }
+    if (ref.inner !== undefined) assert.ok(json.refs[ref.inner] !== undefined)
+  }
+})

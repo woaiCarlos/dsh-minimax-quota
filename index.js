@@ -36,6 +36,16 @@ const SETTINGS_NAMESPACE = 'llm-pi-ai'
 /** The provider route inside that namespace. */
 const PROVIDER_ROUTE = 'minimax-cn'
 
+/**
+ * The grammar a credential reference must match.
+ *
+ * The credentials service only recognises a reference that is a POSIX shell
+ * identifier, so a reference outside this grammar resolves to nothing: the
+ * plugin would answer `missing-credential` while the key itself sits in
+ * plain text in the profile patch.
+ */
+const CREDENTIAL_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
 /** The field of the provider map that holds the model list. */
 const PROVIDERS_PATH = 'providers'
 
@@ -80,12 +90,50 @@ function providerRoutes(descriptor) {
 }
 
 /**
+ * The provider routes the profile override itself carries.
+ *
+ * The override is the raw profile patch row, so its entries carry exactly
+ * the wording the user wrote: no schema default has been materialised into
+ * them. The effective projection cannot be used for this, because it is the
+ * schema-resolved one — every entry the user wrote carries a materialised
+ * `compat` block, and writing those back would change the user's wording.
+ *
+ * @param descriptor - the pi-ai namespace descriptor.
+ * @returns the override's provider routes, or undefined when the descriptor
+ *   carries no override.
+ */
+function overrideRoutes(descriptor) {
+  const providers = descriptor?.user?.providers
+  return providers !== null && typeof providers === 'object' ? providers : undefined
+}
+
+/**
+ * The model entries the profile override itself carries.
+ *
+ * @param descriptor - the pi-ai namespace descriptor.
+ * @returns the entries, or undefined when the override carries none.
+ */
+function overrideModels(descriptor) {
+  const routes = overrideRoutes(descriptor)
+  if (routes === undefined) return undefined
+  const models = routes[PROVIDER_ROUTE]?.models
+  return Array.isArray(models) ? models : undefined
+}
+
+/**
  * The model entries the profile currently lists.
+ *
+ * The override's own entries come first, so that the entries the user
+ * wrote keep their wording. The effective entries are the fallback, for a
+ * route the override does not carry: a route the user configured in an
+ * inherited layer is only visible there.
  *
  * @param descriptor - the pi-ai namespace descriptor.
  * @returns the listed entries.
  */
 function currentModels(descriptor) {
+  const raw = overrideModels(descriptor)
+  if (raw !== undefined) return raw
   const models = providerRoutes(descriptor)[PROVIDER_ROUTE]?.models
   return Array.isArray(models) ? models : []
 }
@@ -103,6 +151,26 @@ function currentModels(descriptor) {
  */
 function reportFailure(ctx, message, error) {
   ctx.logger?.error?.('%s: %s', message, error)
+}
+
+/**
+ * Report one sync on the Host log.
+ *
+ * The design asks for one line per sync, and the line has to say how many
+ * models were added: a sync that added nothing and a sync that added three
+ * read the same otherwise.
+ *
+ * @param ctx - Host context.
+ * @param label - what ran, e.g. 'the startup sync'.
+ * @param result - the sync result.
+ */
+function logSync(ctx, label, result) {
+  if (result?.ok !== true) {
+    ctx.logger?.warn?.('%s: %s', `dsh-minimax: ${label} failed`, result?.reason ?? 'unknown')
+    return
+  }
+  const added = Array.isArray(result.added) ? result.added.length : 0
+  ctx.logger?.info?.('%s: %d', `dsh-minimax: ${label} added`, added)
 }
 
 /** The sync that is running right now, so a second caller waits for it. */
@@ -159,6 +227,8 @@ async function runSyncOnce(ctx, options = {}) {
     : (dir, state) => writeState(dir, state))
 
   const state = await readStateFn(profileDir)
+  const addedModels = Array.isArray(state.addedModels) ? state.addedModels : []
+  const retiredModels = Array.isArray(state.retiredModels) ? state.retiredModels : []
   const listed = currentModels(descriptor)
   const ids = await fetchModelIds(apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
   if (ids === null) {
@@ -167,46 +237,60 @@ async function runSyncOnce(ctx, options = {}) {
     return { ok: false, reason: 'model-list-failed' }
   }
   const candidateIds = ids
-    .filter((id) => !listed.some((entry) => entry?.id === id) && !state.addedModels.includes(id))
+    .filter((id) => !listed.some((entry) => entry?.id === id)
+      && !addedModels.includes(id)
+      // A model MiniMax has retired stays retired, and it is remembered:
+      // `/v1/models` keeps listing it, so probing it again every sweep would
+      // cost two upstream requests for an answer that never changes.
+      && !retiredModels.includes(id))
 
   const entries = new Map()
+  const retiredIds = []
   for (const id of candidateIds) {
     const probe = await probeModel(id, apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
+    if (probe.status === 'retired') {
+      retiredIds.push(id)
+      continue
+    }
     if (probe.status !== 'ok') continue
     entries.set(id, buildModelEntry(id, probe))
   }
 
   const plan = planAppend({
     currentModels: listed,
-    addedModels: state.addedModels,
+    addedModels,
     candidateIds,
     entries,
   })
-  if (!plan.changed) {
-    return { ok: true, added: [], models: listed }
+  if (!plan.changed && retiredIds.length === 0) {
+    return { ok: true, added: [], models: plan.models }
   }
 
-  // The written map is the effective one, because the settings service
-  // replaces the whole `providers` map: a route the user configured in an
-  // inherited layer is only visible in the effective projection, and a map
-  // built from the profile override alone would drop that route and the
-  // credential environment it needs.
-  const routes = providerRoutes(descriptor)
-  await settings.write(SETTINGS_NAMESPACE, (current) => ({
-    ...current,
-    providers: {
-      ...routes,
-      [PROVIDER_ROUTE]: {
-        ...routes[PROVIDER_ROUTE],
-        models: plan.models,
+  if (plan.changed) {
+    // The written map is the effective one, because the settings service
+    // replaces the whole `providers` map: a route the user configured in an
+    // inherited layer is only visible in the effective projection, and a map
+    // built from the profile override alone would drop that route and the
+    // credential environment it needs. The route's model list is the planned
+    // one, which the user's own entries start from.
+    const routes = providerRoutes(descriptor)
+    await settings.write(SETTINGS_NAMESPACE, (current) => ({
+      ...current,
+      providers: {
+        ...routes,
+        [PROVIDER_ROUTE]: {
+          ...routes[PROVIDER_ROUTE],
+          models: plan.models,
+        },
       },
-    },
-  }), descriptor.revision, [[PROVIDERS_PATH, PROVIDER_ROUTE, MODELS_PATH]])
+    }), descriptor.revision, [[PROVIDERS_PATH, PROVIDER_ROUTE, MODELS_PATH]])
+  }
 
   const now = options.now ?? Date.now
   try {
     await writeStateFn(profileDir, {
-      addedModels: [...state.addedModels, ...plan.addedIds],
+      addedModels: [...addedModels, ...plan.addedIds],
+      retiredModels: [...retiredModels, ...retiredIds],
       lastSyncAt: now(),
     })
   } catch {
@@ -307,7 +391,11 @@ export async function apply(ctx, config) {
           if (!res.writableEnded) abort.abort()
         })
         try {
-          send(res, await runSync(ctx, { credentialRef, signal: abort.signal }))
+          const result = await runSync(ctx, { credentialRef, signal: abort.signal })
+          // Every sync leaves one line on the Host log, so the operator can
+          // see what the plugin did without reading the profile.
+          logSync(ctx, 'the manual sync', result)
+          send(res, result)
         } catch (error) {
           // The browser only ever receives a fixed reason, so a failure nobody
           // anticipated cannot carry an internal message into the page.
@@ -376,10 +464,12 @@ function scheduleSync(ctx, credentialRef) {
       if (cancelled) return
       try {
         const result = await runSync(ctx, { credentialRef })
+        logSync(ctx, 'the startup sync', result)
         if (result.ok || result.reason === 'missing-credential') return
-      } catch {
+      } catch (error) {
         // A failed sync must never take the plugin down; the next attempt
-        // tries again.
+        // tries again. The failure is not swallowed: it goes to the log.
+        reportFailure(ctx, 'dsh-minimax: the startup sync failed', error)
       }
     }
   }
@@ -394,8 +484,10 @@ function scheduleSync(ctx, credentialRef) {
  * The plugin probes the models MiniMax offers at startup, and then once a
  * day, so a model MiniMax releases while the plugin is running still
  * arrives without the user restarting anything. Only models that are
- * neither listed by the user nor added by the plugin are probed, so a quiet
- * day costs one model-list request and nothing else.
+ * neither listed by the user nor added by the plugin nor retired by MiniMax
+ * are probed, so a quiet day costs one model-list request and nothing else.
+ * A model MiniMax retired is probed once and then remembered, so it does not
+ * cost two requests every day for an answer that never changes.
  *
  * @param ctx - Host context.
  * @param credentialRef - credential reference to resolve.
@@ -435,7 +527,7 @@ function scheduleDailySync(ctx, credentialRef) {
       if (cancelled) return
       try {
         const result = await runSync(ctx, { credentialRef })
-        ctx.logger?.info?.('%s: %s', 'dsh-minimax: the daily sync found', result.ok ? 'no new model' : result.reason)
+        logSync(ctx, 'the daily sync', result)
       } catch (error) {
         reportFailure(ctx, 'the daily sync failed', error)
       }
@@ -448,8 +540,33 @@ function scheduleDailySync(ctx, credentialRef) {
 
 /**
  * Services this plugin waits for before it activates.
+ *
+ * `profileContext` is declared because the plugin's bookkeeping lives in the
+ * profile directory: without the service the fallbacks would swap in a
+ * no-op state reader and writer, the plugin would have no memory of what it
+ * added, and a model the user deleted by hand would silently come back.
  */
-export const inject = ['webServer', 'credentials', 'settings']
+export const inject = ['webServer', 'credentials', 'settings', 'profileContext']
+
+/**
+ * The schema of the credential reference field.
+ *
+ * The field is volatile, so the settings service can edit it without
+ * remounting the plugin. The shape mirrors what a schema library would
+ * produce, because the settings service rebuilds the schema from `toJSON`.
+ */
+const CredentialRefSchema = {
+  type: 'string',
+  meta: { volatile: true },
+  toJSON() {
+    return {
+      uid: 'dsh-minimax.credentialRef',
+      refs: {
+        'dsh-minimax.credentialRef': { type: 'string', meta: { volatile: true } },
+      },
+    }
+  },
+}
 
 /**
  * A Standard Schema for the plugin's configuration.
@@ -458,6 +575,11 @@ export const inject = ['webServer', 'credentials', 'settings']
  * entry, so this bundle carries its own tiny implementation rather than a
  * schema dependency: the bundle is installed as a link into a workspace
  * directory, where a declared dependency would not resolve.
+ *
+ * The schema also carries the shape the settings service reads — `type`,
+ * `meta`, `dict` and `toJSON` — because without them the settings service
+ * finds no form for this row, and the row stays invisible in the Settings
+ * UI, where `credentialRef` is edited.
  */
 const Config = {
   '~standard': {
@@ -479,12 +601,39 @@ const Config = {
           issues.push({ message: 'dsh-minimax: credentialRef must be a non-empty string', path: [key] })
           continue
         }
+        if (!CREDENTIAL_REF_PATTERN.test(entry)) {
+          // The credentials service only recognises a reference that is a
+          // shell identifier. A reference outside that grammar resolves to
+          // nothing, so it would read as a missing credential while the key
+          // itself sat in plain text in the profile patch.
+          issues.push({
+            message: `dsh-minimax: credentialRef "${entry}" must be a credential reference name (letters, digits and underscores, not starting with a digit)`,
+            path: [key],
+          })
+          continue
+        }
         config.credentialRef = entry
       }
       if (issues.length > 0) return { issues }
       if (config.credentialRef === undefined) config.credentialRef = DEFAULT_CREDENTIAL_REF
       return { value: config }
     },
+  },
+  type: 'object',
+  meta: {},
+  dict: { credentialRef: CredentialRefSchema },
+  toJSON() {
+    return {
+      uid: 'dsh-minimax.config',
+      refs: {
+        'dsh-minimax.config': {
+          type: 'object',
+          meta: {},
+          dict: { credentialRef: 'dsh-minimax.credentialRef' },
+        },
+        'dsh-minimax.credentialRef': { type: 'string', meta: { volatile: true } },
+      },
+    }
   },
 }
 

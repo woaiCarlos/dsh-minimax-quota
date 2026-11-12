@@ -121,3 +121,32 @@ test('two concurrent writes both succeed and never blend their ids', async () =>
     assert.deepEqual(await readdir(dir), [STATE_FILENAME])
   }
 })
+
+test('writeState stores the retired models', async () => {
+  const dir = await scratchDir()
+  await writeState(dir, { addedModels: [], retiredModels: ['MiniMax-M2'], lastSyncAt: 1760000000000 })
+  const state = await readState(dir)
+  assert.deepEqual(state.retiredModels, ['MiniMax-M2'])
+  assert.equal(state.lastSyncAt, 1760000000000)
+})
+
+test('writeState sorts and de-duplicates the retired models', async () => {
+  const dir = await scratchDir()
+  await writeState(dir, { addedModels: [], retiredModels: ['b', 'a', 'b'], lastSyncAt: null })
+  const state = await readState(dir)
+  assert.deepEqual(state.retiredModels, ['a', 'b'])
+})
+
+test('readState fills in the retired models an older version did not write', async () => {
+  const dir = await scratchDir()
+  await writeFile(join(dir, STATE_FILENAME), JSON.stringify({ addedModels: ['MiniMax-M3'] }), 'utf8')
+  const state = await readState(dir)
+  assert.deepEqual(state.retiredModels, [])
+})
+
+test('readState drops retired entries that are not strings', async () => {
+  const dir = await scratchDir()
+  await writeFile(join(dir, STATE_FILENAME), JSON.stringify({ retiredModels: ['a', 7, null, ''] }), 'utf8')
+  const state = await readState(dir)
+  assert.deepEqual(state.retiredModels, ['a'])
+})
