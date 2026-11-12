@@ -1768,6 +1768,35 @@ test('readState drops entries that are not strings', async () => {
   assert.deepEqual(state.addedModels, ['a'])
   assert.equal(state.lastSyncAt, null)
 })
+
+test('writeState drops entries that are not strings', async () => {
+  const dir = await scratchDir()
+  const stored = await writeState(dir, { addedModels: ['a', 7, null, ''], lastSyncAt: 'x' })
+  assert.deepEqual(stored.addedModels, ['a'])
+  assert.equal(stored.lastSyncAt, null)
+  const state = await readState(dir)
+  assert.deepEqual(state.addedModels, ['a'])
+})
+
+test('two concurrent writes both succeed and never blend their ids', async () => {
+  const dir = await scratchDir()
+  const first = Array.from({ length: 2000 }, (_, i) => `model-a-${i}`).sort()
+  const second = Array.from({ length: 2000 }, (_, i) => `model-b-${i}`).sort()
+  for (let round = 0; round < 5; round += 1) {
+    // Two writers, one directory: each write owns its own temporary file.
+    await Promise.all([
+      writeState(dir, { addedModels: first, lastSyncAt: 1 }),
+      writeState(dir, { addedModels: second, lastSyncAt: 2 }),
+    ])
+    const ids = (await readState(dir)).addedModels
+    const isFirst = ids.length === first.length && ids.every((id, i) => id === first[i])
+    const isSecond = ids.length === second.length && ids.every((id, i) => id === second[i])
+    // A blended file would be valid JSON holding ids of both writers, and
+    // readState would accept it without complaint.
+    assert.ok(isFirst || isSecond, `the state file blended both payloads (${ids.length} ids)`)
+    assert.deepEqual(await readdir(dir), [STATE_FILENAME])
+  }
+})
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1867,7 +1896,7 @@ export async function writeState(dir, state) {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/state.test.js`
-Expected: PASS — 11 tests.
+Expected: PASS — 13 tests.
 
 - [ ] **Step 5: Commit**
 
