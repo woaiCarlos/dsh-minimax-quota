@@ -293,7 +293,10 @@ export const inject = ['credentials', 'settings']
 | MiniMax-M2.5-highspeed | 204 800 | text | 无 |
 | MiniMax-M2.1 / M2.1-highspeed / M2 | 204 800 | text | 无 |
 
-快照里的模型 `input` 模态按 models.dev 原样保留（`video` 也保留 —— API 层不拦）。
+快照里的模型 `input` 模态按 models.dev 原样保留，但**过滤掉 `video`** ——
+pi-ai 的 `MODALITIES` 只接受 `text` 和 `image`
+（`dsh-llm-pi-ai/lib/index.js:282`），写 `video` 会让条目校验失败。
+即 M3 系为 `[text, image]`，M2.x 系为 `[text]`。
 
 **快照里没有的新模型**：用保守默认值（`contextWindow` 1 000 000、`maxTokens` 用探测值、
 `input` [text]、`reasoningEfforts: false`），并在面板上标记「未验证」。
@@ -481,7 +484,7 @@ DSH 没有给插件用的 toast 服务（`toast` 相关命中全是 CSS 变量�
 - **规格快照的更新方式**：内置快照随插件版本更新。若将来想自动刷新，
   可选 OpenRouter 的 `/api/v1/models`（845 KB，比 models.dev 的 6 MB 小），但它的
   MiniMax 条目更少、且没有 `reasoning_options`。当前决定不自动刷新。
-- **`input` 模态要不要含 `video`**：models.dev 标了 video，但 pi-ai 的 `MODALITIES`
-  是否接受 video 需要在实现时确认；不接受则只保留 text / image。
+- **`input` 模态的视频支持**：已确认 pi-ai 的 `MODALITIES` 只有 `text` 与 `image`，
+  快照里的 `video` 一律过滤掉。无需再定。
 - **`maxTokens` 用 API 的硬上限还是 models.dev 的值**：本设计用 API 的硬上限
   （M2.7 会是 196 608 而非 131 072）。若实际使用中遇到问题，改回快照值即可。
