@@ -3218,17 +3218,79 @@ And a style for the button, beside the other panel styles:
 '.__mmq_syncButton:disabled{opacity:.6;cursor:default}',
 ```
 
-- [ ] **Step 7: Run the checks**
+- [ ] **Step 7: Fix three things the review found**
+
+**The header comment is now false.** It says the Host answers one same-origin route, and there
+are two. Correct it:
+
+```
+ * The API key never reaches the browser: the Host answers same-origin
+ * routes with the quota view and the model summary, and this half only
+ * reads them.
+```
+
+**A failed sync is invisible.** `fetch` does not reject on an HTTP error status, so a 4xx or a 5xx
+took the same path as a success. Check the status, and say what the failure means honestly — the
+status poll reports the model list, not the outcome of the sync:
+
+```js
+  const syncNow = async () => {
+    if (syncing) return
+    setSyncing(true)
+    try {
+      const response = await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+      if (!response.ok) return
+    } catch {
+      // A failed request leaves the panel as it was. The status poll reports
+      // the model list, not the outcome of the sync.
+    } finally {
+      setSyncing(false)
+    }
+  }
+```
+
+**The sync button disappears exactly when it is most useful.** The section returned `null` when no
+model had been synced, so a profile with a MiniMax route but no MiniMax models yet could not ask
+for a sync. Render the section whenever the status route answered, and the chips only when there
+are some:
+
+```js
+      if (models === undefined) return null
+      const synced = Array.isArray(models.synced) ? models.synced : []
+      const added = Array.isArray(models.added) ? models.added : []
+      return h('div', { className: '__mmq_models' },
+```
+
+and inside the section, guard only the chip list:
+
+```js
+        synced.length > 0
+          ? h('div', { className: '__mmq_modelList' },
+              synced.map((id) => h('span', { className: '__mmq_modelChip', key: id }, id)),
+            )
+          : null,
+```
+
+The credential grep must then look at **added lines only**, because the corrected comment puts the
+words "API key" in the diff's context:
+
+```
+git diff -U0 -- client.js | grep '^+' | grep -inE "api[-_ ]?key|token|secret|credential|bearer|authorization|x-api-key|password|cookie|MINIMAX_CN_API_KEY"
+```
+
+It must come back empty.
+
+- [ ] **Step 8: Run the checks**
 
 Run: `npm test`
 Expected: PASS — the suite plus both syntax checks.
 
-- [ ] **Step 8: Verify the locale JSON parses**
+- [ ] **Step 9: Verify the locale JSON parses**
 
 Run: `node -e "for (const f of ['locale/zh.json','locale/en.json']) { JSON.parse(require('fs').readFileSync(f,'utf8')); console.log('ok', f) }"`
 Expected: `ok locale/zh.json` and `ok locale/en.json`.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add client.js locale/zh.json locale/en.json
