@@ -39,6 +39,7 @@ window.__ModuleLoader__.load({
       panelModel: '模型分组：{name}',
       modelsTitle: '已同步的模型',
       modelsAdded: '已自动补充 {count} 个新模型',
+      modelsTotalAdded: '插件已自动添加 {count} 个模型',
       modelsSyncedAt: '模型列表更新于 {when}',
       modelsSync: '立即同步',
       modelsSyncing: '同步中…',
@@ -69,6 +70,7 @@ window.__ModuleLoader__.load({
       panelModel: 'Model bucket: {name}',
       modelsTitle: 'Synced models',
       modelsAdded: '{count} new model(s) added automatically',
+      modelsTotalAdded: 'The plugin has added {count} model(s) in total',
       modelsSyncedAt: 'Model list updated at {when}',
       modelsSync: 'Sync now',
       modelsSyncing: 'Syncing…',
@@ -195,6 +197,20 @@ window.__ModuleLoader__.load({
       if (percent <= 15) return ' __mmq_barFillCritical'
       if (percent <= 40) return ' __mmq_barFillLow'
       return ''
+    }
+
+    /**
+     * The ids of the models the plugin added, in a status payload.
+     *
+     * The plugin's own list of added models is cumulative, so the count —
+     * not the list — is what says whether there is news.
+     *
+     * @param payload - the status payload.
+     * @returns the model ids the plugin added.
+     */
+    function addedModelIds(payload) {
+      const added = payload?.models?.added
+      return Array.isArray(added) ? added : []
     }
 
     // ── the models the user has been told about ───────────────────────────
@@ -528,7 +544,7 @@ window.__ModuleLoader__.load({
             )
           : null,
         added.length > 0
-          ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
+          ? h('div', { className: '__mmq_modelNotice' }, t('modelsTotalAdded', { count: added.length }))
           : null,
         models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
         onSync
@@ -561,6 +577,9 @@ window.__ModuleLoader__.load({
       const panelRef = React.useRef(null)
       // Whether the models of this panel opening have been told already.
       const toldRef = React.useRef(false)
+      // The same set of seen models, for the marking callback: it reads the
+      // ref, so the callback never depends on the state and stays stable.
+      const seenRef = React.useRef(seen)
 
       // The status route answers both halves: the quota the pill shows and
       // the model summary the panel lists.
@@ -615,24 +634,27 @@ window.__ModuleLoader__.load({
         }
       }, [active, current?.provider, current?.model])
 
-      // The badge counts the models the plugin added that the user has not
-      // been told about yet. The plugin's own list of added models is
-      // cumulative, so the count — not the list — is what says whether
-      // there is news.
-      const addedModels = Array.isArray(payload?.models?.added) ? payload.models.added : []
+      // The models the plugin added, and the ones the user has not been
+      // told about yet.
+      const addedModels = React.useMemo(() => addedModelIds(payload), [payload])
       const unseen = addedModels.filter((id) => !seen.has(id))
 
       // Tell the user about the models the plugin added: they are marked as
       // seen and remembered, so the badge stays away — also after the user
       // opens a different conversation.
+      //
+      // The callback reads the current set from the ref, so it never depends
+      // on the state and stays stable across renders.
       const markSeen = React.useCallback((ids) => {
-        const fresh = ids.filter((id) => !seen.has(id))
+        const current = seenRef.current
+        const fresh = ids.filter((id) => !current.has(id))
         if (fresh.length === 0) return
-        const next = new Set(seen)
+        const next = new Set(current)
         for (const id of fresh) next.add(id)
+        seenRef.current = next
         setSeen(next)
         writeSeenModels(fresh)
-      }, [seen])
+      }, [])
 
       // Opening the panel is the moment the user is told which models the
       // plugin added. The panel only shows once the status route answered,
@@ -647,7 +669,7 @@ window.__ModuleLoader__.load({
         if (payload === null) return
         toldRef.current = true
         markSeen(addedModels)
-      }, [open, payload])
+      }, [open, payload, markSeen, addedModels])
 
       // Place the panel above the trigger, inside the viewport. The panel is
       // portaled into the document body, so its node attaches after this
@@ -802,6 +824,11 @@ window.__ModuleLoader__.load({
                 if (opening) {
                   readStatus().then((result) => {
                     setPayload(result)
+                    // This read is part of the opening, so the models it
+                    // brings are told: the panel is showing them. A model
+                    // that arrives later, while the panel is open, is still
+                    // news and brings the badge back.
+                    markSeen(addedModelIds(result))
                   })
                 }
               },
@@ -811,12 +838,18 @@ window.__ModuleLoader__.load({
           ),
           // The badge is the number of models the user has not been told
           // about, and it carries the locale string as its name, so a screen
-          // reader says what the number means.
-          unseen.length > 0
+          // reader says what the number means. It is not rendered while the
+          // panel is open: the panel is where the news is delivered, and a
+          // badge next to it would say it twice.
+          unseen.length > 0 && !open
             ? h(
                 'span',
                 {
                   className: '__mmq_badge',
+                  // A span with no role is a generic element, whose name is
+                  // prohibited, so the label would never be exposed. The
+                  // badge is an image with a name instead.
+                  role: 'img',
                   'aria-label': t('modelsAdded', { count: unseen.length }),
                 },
                 unseen.length,

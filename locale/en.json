@@ -24,6 +24,7 @@
     "panelModel": "Model bucket: {name}",
     "modelsTitle": "Synced models",
     "modelsAdded": "{count} new model(s) added automatically",
+    "modelsTotalAdded": "The plugin has added {count} model(s) in total",
     "modelsSyncedAt": "Model list updated at {when}",
     "modelsSync": "Sync now",
     "modelsSyncing": "Syncing…",

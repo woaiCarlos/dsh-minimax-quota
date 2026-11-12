@@ -24,6 +24,7 @@
     "panelModel": "模型分组：{name}",
     "modelsTitle": "已同步的模型",
     "modelsAdded": "已自动补充 {count} 个新模型",
+    "modelsTotalAdded": "插件已自动添加 {count} 个模型",
     "modelsSyncedAt": "模型列表更新于 {when}",
     "modelsSync": "立即同步",
     "modelsSyncing": "同步中…",
