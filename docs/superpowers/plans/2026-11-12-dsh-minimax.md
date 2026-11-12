@@ -718,6 +718,7 @@ import {
   fetchModelIds,
   isRetired,
   parseMaxTokensLimit,
+  postMessage,
   probeModel,
 } from '../lib/probe.js'
 
@@ -742,13 +743,7 @@ test('isRetired recognizes the retired-model refusal', () => {
   assert.equal(isRetired('The model "MiniMax-M2" is no longer available. (2069)'), true)
   assert.equal(isRetired('invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)'), false)
 })
-```
 
-- [ ] **Step 2: Write the failing test for the model list**
-
-Append to `test/probe.test.js`:
-
-```js
 test('fetchModelIds lists every candidate id', async () => {
   const fetchImpl = async () => jsonResponse({
     object: 'list',
@@ -757,17 +752,22 @@ test('fetchModelIds lists every candidate id', async () => {
   assert.deepEqual(await fetchModelIds('sk-test', { fetchImpl }), ['MiniMax-M3.1-Flash', 'MiniMax-M2'])
 })
 
-test('fetchModelIds answers an empty list when the endpoint carries no models', async () => {
+test('fetchModelIds answers an empty list when the account carries no models', async () => {
   const fetchImpl = async () => jsonResponse({ object: 'list', data: [] }, 200)
   assert.deepEqual(await fetchModelIds('sk-test', { fetchImpl }), [])
 })
-```
 
-- [ ] **Step 3: Write the failing test for the probe**
+test('fetchModelIds answers null when the list cannot be read', async () => {
+  const refused = await fetchModelIds('sk-test', {
+    fetchImpl: async () => jsonResponse({ error: { message: 'invalid api key' } }, 401),
+  })
+  assert.equal(refused, null)
+  const broken = await fetchModelIds('sk-test', {
+    fetchImpl: async () => { throw new Error('fetch failed') },
+  })
+  assert.equal(broken, null)
+})
 
-Append to `test/probe.test.js`:
-
-```js
 test('probeModel reads the output cap from a refusal without generating', async () => {
   const bodies = []
   const fetchImpl = async (_url, init) => {
@@ -786,7 +786,14 @@ test('probeModel reads the output cap from a refusal without generating', async 
   assert.equal(bodies[0].max_tokens, OVER_LIMIT_MAX_TOKENS)
 })
 
-test('probeModel reports a retired model instead of failing', async () => {
+test('probeModel reports a failed probe when the cap cannot be read', async () => {
+  const fetchImpl = async () => jsonResponse({ error: { message: 'invalid api key' } }, 401)
+  const result = await probeModel('MiniMax-M3', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.maxTokens, undefined)
+})
+
+test('probeModel reports a retired model that says so right away', async () => {
   const fetchImpl = async () => jsonResponse({
     error: { message: 'The model "MiniMax-M2" is no longer available. (2069)' },
   })
@@ -796,7 +803,9 @@ test('probeModel reports a retired model instead of failing', async () => {
 })
 
 test('probeModel reports a retired model whose cap request still answers', async () => {
+  let calls = 0
   const fetchImpl = async (_url, init) => {
+    calls += 1
     const body = JSON.parse(init.body)
     if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
       // MiniMax validates max_tokens before it checks whether the model still
@@ -812,6 +821,7 @@ test('probeModel reports a retired model whose cap request still answers', async
   const result = await probeModel('MiniMax-M2', 'sk-test', { fetchImpl })
   assert.equal(result.status, 'retired')
   assert.equal(result.modelId, 'MiniMax-M2')
+  assert.equal(calls, 2)
 })
 
 test('probeModel detects a model that thinks', async () => {
@@ -847,25 +857,80 @@ test('probeModel detects a model that does not think', async () => {
   assert.equal(result.supportsThinking, false)
 })
 
+test('probeModel reports a model that refuses the thinking field as not thinking', async () => {
+  const bodies = []
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    bodies.push(body)
+    if (body.max_tokens === OVER_LIMIT_MAX_TOKENS) {
+      return jsonResponse({
+        error: { message: 'invalid params, model[MiniMax-M2.7] does not support max tokens > 196608 (2013)' },
+      })
+    }
+    if (body.thinking !== undefined) {
+      return jsonResponse({ error: { message: 'invalid params, thinking is not supported by this model' } })
+    }
+    return jsonResponse({ content: [{ type: 'text', text: '391' }] }, 200)
+  }
+  const result = await probeModel('MiniMax-M2.7', 'sk-test', { fetchImpl })
+  assert.equal(result.status, 'ok')
+  assert.equal(result.maxTokens, 196608)
+  assert.equal(result.supportsThinking, false)
+  assert.equal(bodies.length, 3)
+})
+
 test('probeModel reports a failed probe when the model answers nothing usable', async () => {
   const fetchImpl = async () => jsonResponse({ error: { message: 'internal error' } })
   const result = await probeModel('MiniMax-M3', 'sk-test', { fetchImpl })
   assert.equal(result.status, 'failed')
 })
+
+test('every request carries a signal and the key travels only in a header', async () => {
+  const seen = []
+  const fetchImpl = async (_url, init) => {
+    seen.push(init)
+    return jsonResponse({ object: 'list', data: [] }, 200)
+  }
+  await fetchModelIds('sk-secret', { fetchImpl })
+  assert.equal(seen.length, 1)
+  assert.ok(seen[0].signal instanceof AbortSignal)
+  assert.equal(seen[0].headers.authorization, 'Bearer sk-secret')
+  assert.equal(String(seen[0].body ?? '').includes('sk-secret'), false)
+})
+
+test('postMessage reports a network failure', async () => {
+  const fetchImpl = async () => { throw new Error('fetch failed') }
+  const result = await postMessage({ model: 'x' }, 'sk-test', { fetchImpl })
+  assert.equal(result.status, 0)
+  assert.equal(result.message, 'fetch failed')
+  assert.equal(result.payload, undefined)
+})
+
+test('postMessage reports an unparsable body', async () => {
+  const fetchImpl = async () => new Response('not json', { status: 200 })
+  const result = await postMessage({ model: 'x' }, 'sk-test', { fetchImpl })
+  assert.equal(result.status, 200)
+  assert.equal(result.message, 'HTTP 200')
+  assert.equal(result.payload, undefined)
+})
+
+test('postMessage reports an empty message when the payload carries no error', async () => {
+  const fetchImpl = async () => jsonResponse({ content: [] }, 200)
+  const result = await postMessage({ model: 'x' }, 'sk-test', { fetchImpl })
+  assert.equal(result.status, 200)
+  assert.equal(result.message, '')
+})
 ```
 
-- [ ] **Step 4: Run the test to verify it fails**
+- [ ] **Step 2: Write the failing test for the model list**
 
-Run: `node --test test/probe.test.js`
-Expected: FAIL with `Cannot find module '../lib/probe.js'`
-
-- [ ] **Step 5: Write `lib/probe.js`**
+Append to `test/probe.test.js`:
 
 ```js
 /**
  * Talking to MiniMax about the models its account can use.
  *
- * Three facts shape this module.
+ * Four facts shape this module.
  *
  * `GET /v1/models` lists models the account can no longer call, so the list
  * is a candidate set and every candidate still has to be probed.
@@ -877,6 +942,10 @@ Expected: FAIL with `Cannot find module '../lib/probe.js'`
  * Whether a model thinks can only be told by a request that makes it think.
  * A prompt like "hi" yields a false negative for every model, because there
  * is nothing to think about; the prompt has to demand reasoning.
+ *
+ * MiniMax validates `max_tokens` before it checks whether the model still
+ * exists, so a retired model answers the cap request with a cap and only
+ * says it is gone on the next request.
  */
 
 /** Anthropic-compatible messages endpoint. */
@@ -963,23 +1032,32 @@ export async function postMessage(body, apiKey, { signal, fetchImpl = fetch } = 
  *
  * @param apiKey - the MiniMax secret.
  * @param options - `{ signal, fetchImpl }`.
- * @returns the candidate model ids.
+ * @returns the candidate model ids, or null when the list could not be read.
  */
 export async function fetchModelIds(apiKey, { signal, fetchImpl = fetch } = {}) {
   const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
   const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
+  let response
   try {
-    const response = await fetchImpl(MODELS_URL, {
+    response = await fetchImpl(MODELS_URL, {
       method: 'GET',
       headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
       signal: composed,
     })
-    const body = await response.json()
-    const data = Array.isArray(body?.data) ? body.data : []
-    return data.map((entry) => entry?.id).filter((id) => typeof id === 'string' && id.length > 0)
   } catch {
-    return []
+    // A failed read is not an empty account, and the caller has to be able to
+    // tell the two apart.
+    return null
   }
+  let body
+  try {
+    body = await response.json()
+  } catch {
+    return null
+  }
+  if (!Array.isArray(body?.data)) return null
+  const data = body.data
+  return data.map((entry) => entry?.id).filter((id) => typeof id === 'string' && id.length > 0)
 }
 
 /**
@@ -999,22 +1077,450 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
   const capMessage = cap.message
   if (isRetired(capMessage)) return { status: 'retired', modelId }
   const maxTokens = parseMaxTokensLimit(capMessage)
+  if (maxTokens === undefined) {
+    // The cap request did not answer with a cap, so the measurement failed.
+    // Reporting this as ok would record the model as healthy with an unknown
+    // cap, which is the opposite of what was measured.
+    return { status: 'failed', modelId, reason: capMessage || `HTTP ${cap.status}` }
+  }
 
+  const thinkingTokens = Math.min(8192, maxTokens)
   const thinking = await postMessage({
     model: modelId,
-    max_tokens: 8192,
+    max_tokens: thinkingTokens,
     messages: [{ role: 'user', content: THINKING_PROMPT }],
     thinking: { type: 'enabled', budget_tokens: 4096 },
   }, apiKey, { signal, fetchImpl })
   const thinkingMessage = thinking.message
   // MiniMax validates `max_tokens` before it checks whether the model still
-  // exists. A retired model therefore answers the cap request with a cap and
-  // only says it is gone on the next request, so the retired check has to
-  // read this response too.
+  // exists, so a retired model answers the cap request with a cap and only
+  // says it is gone on this request.
   if (isRetired(thinkingMessage)) return { status: 'retired', modelId }
   const blocks = Array.isArray(thinking.payload?.content) ? thinking.payload.content : undefined
   if (blocks === undefined) {
-    return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
+    if (!/thinking/i.test(thinkingMessage)) {
+      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
+    }
+    // The endpoint refused the `thinking` field, which means this model does
+    // not think. Ask again without it: an answer then is a measurement rather
+    // than a failure.
+    const plain = await postMessage({
+      model: modelId,
+      max_tokens: thinkingTokens,
+      messages: [{ role: 'user', content: THINKING_PROMPT }],
+    }, apiKey, { signal, fetchImpl })
+    const plainBlocks = Array.isArray(plain.payload?.content) ? plain.payload.content : undefined
+    if (plainBlocks === undefined) {
+      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
+    }
+    return { status: 'ok', modelId, maxTokens, supportsThinking: false }
+  }
+  return {
+    status: 'ok',
+    modelId,
+    maxTokens,
+    supportsThinking: blocks.some((block) => block?.type === 'thinking'),
+  }
+}
+```
+
+- [ ] **Step 3: Write the failing test for the probe**
+
+Append to `test/probe.test.js`:
+
+```js
+/**
+ * Talking to MiniMax about the models its account can use.
+ *
+ * Four facts shape this module.
+ *
+ * `GET /v1/models` lists models the account can no longer call, so the list
+ * is a candidate set and every candidate still has to be probed.
+ *
+ * The exact output cap is written into the refusal of an over-limit
+ * request, and that request is rejected before generation, so reading the
+ * cap costs nothing.
+ *
+ * Whether a model thinks can only be told by a request that makes it think.
+ * A prompt like "hi" yields a false negative for every model, because there
+ * is nothing to think about; the prompt has to demand reasoning.
+ *
+ * MiniMax validates `max_tokens` before it checks whether the model still
+ * exists, so a retired model answers the cap request with a cap and only
+ * says it is gone on the next request.
+ */
+
+/** Anthropic-compatible messages endpoint. */
+export const MESSAGES_URL = 'https://api.minimaxi.com/anthropic/v1/messages'
+
+/** OpenAI-compatible model list endpoint. */
+export const MODELS_URL = 'https://api.minimaxi.com/v1/models'
+
+/** A max_tokens value no MiniMax model accepts, used to elicit the cap. */
+export const OVER_LIMIT_MAX_TOKENS = 999_999_999
+
+/** A prompt that reliably makes a reasoning model produce a thinking block. */
+export const THINKING_PROMPT = 'What is 17*23? Think it through.'
+
+/** How long one probe request may take. */
+export const PROBE_TIMEOUT_MS = 20_000
+
+/**
+ * Read the output cap out of a refusal message.
+ *
+ * @param message - the error message the endpoint answered with.
+ * @returns the cap, or undefined when the message carries none.
+ */
+export function parseMaxTokensLimit(message) {
+  const match = /does not support max tokens > (\d+)/.exec(message)
+  return match === null ? undefined : Number(match[1])
+}
+
+/**
+ * Recognize the refusal that marks a retired model.
+ *
+ * @param message - the error message the endpoint answered with.
+ * @returns true when the model is no longer available.
+ */
+export function isRetired(message) {
+  return /no longer available/i.test(message)
+}
+
+/**
+ * Send one request to the Anthropic-compatible endpoint.
+ *
+ * @param body - the request body.
+ * @param apiKey - the MiniMax secret.
+ * @param options - `{ signal, fetchImpl }`.
+ * @returns the status, the parsed payload when there is one, and the message.
+ */
+export async function postMessage(body, apiKey, { signal, fetchImpl = fetch } = {}) {
+  const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
+  const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
+  let response
+  try {
+    response = await fetchImpl(MESSAGES_URL, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: composed,
+    })
+  } catch (error) {
+    return { status: 0, payload: undefined, message: error instanceof Error ? error.message : String(error) }
+  }
+  let payload
+  try {
+    payload = await response.json()
+  } catch {
+    return { status: response.status, payload: undefined, message: `HTTP ${response.status}` }
+  }
+  return {
+    status: response.status,
+    payload,
+    message: typeof payload?.error?.message === 'string' ? payload.error.message : '',
+  }
+}
+
+/**
+ * List the model ids MiniMax reports for this account.
+ *
+ * The list carries retired models as well, so every id still has to be
+ * probed before it may be written into the profile.
+ *
+ * @param apiKey - the MiniMax secret.
+ * @param options - `{ signal, fetchImpl }`.
+ * @returns the candidate model ids, or null when the list could not be read.
+ */
+export async function fetchModelIds(apiKey, { signal, fetchImpl = fetch } = {}) {
+  const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
+  const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
+  let response
+  try {
+    response = await fetchImpl(MODELS_URL, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
+      signal: composed,
+    })
+  } catch {
+    // A failed read is not an empty account, and the caller has to be able to
+    // tell the two apart.
+    return null
+  }
+  let body
+  try {
+    body = await response.json()
+  } catch {
+    return null
+  }
+  if (!Array.isArray(body?.data)) return null
+  const data = body.data
+  return data.map((entry) => entry?.id).filter((id) => typeof id === 'string' && id.length > 0)
+}
+
+/**
+ * Probe one model for liveness, output cap and thinking.
+ *
+ * @param modelId - the model to probe.
+ * @param apiKey - the MiniMax secret.
+ * @param options - `{ signal, fetchImpl }`.
+ * @returns the probe outcome.
+ */
+export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } = {}) {
+  const cap = await postMessage({
+    model: modelId,
+    max_tokens: OVER_LIMIT_MAX_TOKENS,
+    messages: [{ role: 'user', content: 'hi' }],
+  }, apiKey, { signal, fetchImpl })
+  const capMessage = cap.message
+  if (isRetired(capMessage)) return { status: 'retired', modelId }
+  const maxTokens = parseMaxTokensLimit(capMessage)
+  if (maxTokens === undefined) {
+    // The cap request did not answer with a cap, so the measurement failed.
+    // Reporting this as ok would record the model as healthy with an unknown
+    // cap, which is the opposite of what was measured.
+    return { status: 'failed', modelId, reason: capMessage || `HTTP ${cap.status}` }
+  }
+
+  const thinkingTokens = Math.min(8192, maxTokens)
+  const thinking = await postMessage({
+    model: modelId,
+    max_tokens: thinkingTokens,
+    messages: [{ role: 'user', content: THINKING_PROMPT }],
+    thinking: { type: 'enabled', budget_tokens: 4096 },
+  }, apiKey, { signal, fetchImpl })
+  const thinkingMessage = thinking.message
+  // MiniMax validates `max_tokens` before it checks whether the model still
+  // exists, so a retired model answers the cap request with a cap and only
+  // says it is gone on this request.
+  if (isRetired(thinkingMessage)) return { status: 'retired', modelId }
+  const blocks = Array.isArray(thinking.payload?.content) ? thinking.payload.content : undefined
+  if (blocks === undefined) {
+    if (!/thinking/i.test(thinkingMessage)) {
+      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
+    }
+    // The endpoint refused the `thinking` field, which means this model does
+    // not think. Ask again without it: an answer then is a measurement rather
+    // than a failure.
+    const plain = await postMessage({
+      model: modelId,
+      max_tokens: thinkingTokens,
+      messages: [{ role: 'user', content: THINKING_PROMPT }],
+    }, apiKey, { signal, fetchImpl })
+    const plainBlocks = Array.isArray(plain.payload?.content) ? plain.payload.content : undefined
+    if (plainBlocks === undefined) {
+      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
+    }
+    return { status: 'ok', modelId, maxTokens, supportsThinking: false }
+  }
+  return {
+    status: 'ok',
+    modelId,
+    maxTokens,
+    supportsThinking: blocks.some((block) => block?.type === 'thinking'),
+  }
+}
+```
+
+- [ ] **Step 4: Run the test to verify it fails**
+
+Run: `node --test test/probe.test.js`
+Expected: FAIL with `Cannot find module '../lib/probe.js'`
+
+- [ ] **Step 5: Write `lib/probe.js`**
+
+```js
+/**
+ * Talking to MiniMax about the models its account can use.
+ *
+ * Four facts shape this module.
+ *
+ * `GET /v1/models` lists models the account can no longer call, so the list
+ * is a candidate set and every candidate still has to be probed.
+ *
+ * The exact output cap is written into the refusal of an over-limit
+ * request, and that request is rejected before generation, so reading the
+ * cap costs nothing.
+ *
+ * Whether a model thinks can only be told by a request that makes it think.
+ * A prompt like "hi" yields a false negative for every model, because there
+ * is nothing to think about; the prompt has to demand reasoning.
+ *
+ * MiniMax validates `max_tokens` before it checks whether the model still
+ * exists, so a retired model answers the cap request with a cap and only
+ * says it is gone on the next request.
+ */
+
+/** Anthropic-compatible messages endpoint. */
+export const MESSAGES_URL = 'https://api.minimaxi.com/anthropic/v1/messages'
+
+/** OpenAI-compatible model list endpoint. */
+export const MODELS_URL = 'https://api.minimaxi.com/v1/models'
+
+/** A max_tokens value no MiniMax model accepts, used to elicit the cap. */
+export const OVER_LIMIT_MAX_TOKENS = 999_999_999
+
+/** A prompt that reliably makes a reasoning model produce a thinking block. */
+export const THINKING_PROMPT = 'What is 17*23? Think it through.'
+
+/** How long one probe request may take. */
+export const PROBE_TIMEOUT_MS = 20_000
+
+/**
+ * Read the output cap out of a refusal message.
+ *
+ * @param message - the error message the endpoint answered with.
+ * @returns the cap, or undefined when the message carries none.
+ */
+export function parseMaxTokensLimit(message) {
+  const match = /does not support max tokens > (\d+)/.exec(message)
+  return match === null ? undefined : Number(match[1])
+}
+
+/**
+ * Recognize the refusal that marks a retired model.
+ *
+ * @param message - the error message the endpoint answered with.
+ * @returns true when the model is no longer available.
+ */
+export function isRetired(message) {
+  return /no longer available/i.test(message)
+}
+
+/**
+ * Send one request to the Anthropic-compatible endpoint.
+ *
+ * @param body - the request body.
+ * @param apiKey - the MiniMax secret.
+ * @param options - `{ signal, fetchImpl }`.
+ * @returns the status, the parsed payload when there is one, and the message.
+ */
+export async function postMessage(body, apiKey, { signal, fetchImpl = fetch } = {}) {
+  const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
+  const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
+  let response
+  try {
+    response = await fetchImpl(MESSAGES_URL, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: composed,
+    })
+  } catch (error) {
+    return { status: 0, payload: undefined, message: error instanceof Error ? error.message : String(error) }
+  }
+  let payload
+  try {
+    payload = await response.json()
+  } catch {
+    return { status: response.status, payload: undefined, message: `HTTP ${response.status}` }
+  }
+  return {
+    status: response.status,
+    payload,
+    message: typeof payload?.error?.message === 'string' ? payload.error.message : '',
+  }
+}
+
+/**
+ * List the model ids MiniMax reports for this account.
+ *
+ * The list carries retired models as well, so every id still has to be
+ * probed before it may be written into the profile.
+ *
+ * @param apiKey - the MiniMax secret.
+ * @param options - `{ signal, fetchImpl }`.
+ * @returns the candidate model ids, or null when the list could not be read.
+ */
+export async function fetchModelIds(apiKey, { signal, fetchImpl = fetch } = {}) {
+  const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS)
+  const composed = signal === undefined ? timeout : AbortSignal.any([timeout, signal])
+  let response
+  try {
+    response = await fetchImpl(MODELS_URL, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
+      signal: composed,
+    })
+  } catch {
+    // A failed read is not an empty account, and the caller has to be able to
+    // tell the two apart.
+    return null
+  }
+  let body
+  try {
+    body = await response.json()
+  } catch {
+    return null
+  }
+  if (!Array.isArray(body?.data)) return null
+  const data = body.data
+  return data.map((entry) => entry?.id).filter((id) => typeof id === 'string' && id.length > 0)
+}
+
+/**
+ * Probe one model for liveness, output cap and thinking.
+ *
+ * @param modelId - the model to probe.
+ * @param apiKey - the MiniMax secret.
+ * @param options - `{ signal, fetchImpl }`.
+ * @returns the probe outcome.
+ */
+export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } = {}) {
+  const cap = await postMessage({
+    model: modelId,
+    max_tokens: OVER_LIMIT_MAX_TOKENS,
+    messages: [{ role: 'user', content: 'hi' }],
+  }, apiKey, { signal, fetchImpl })
+  const capMessage = cap.message
+  if (isRetired(capMessage)) return { status: 'retired', modelId }
+  const maxTokens = parseMaxTokensLimit(capMessage)
+  if (maxTokens === undefined) {
+    // The cap request did not answer with a cap, so the measurement failed.
+    // Reporting this as ok would record the model as healthy with an unknown
+    // cap, which is the opposite of what was measured.
+    return { status: 'failed', modelId, reason: capMessage || `HTTP ${cap.status}` }
+  }
+
+  const thinkingTokens = Math.min(8192, maxTokens)
+  const thinking = await postMessage({
+    model: modelId,
+    max_tokens: thinkingTokens,
+    messages: [{ role: 'user', content: THINKING_PROMPT }],
+    thinking: { type: 'enabled', budget_tokens: 4096 },
+  }, apiKey, { signal, fetchImpl })
+  const thinkingMessage = thinking.message
+  // MiniMax validates `max_tokens` before it checks whether the model still
+  // exists, so a retired model answers the cap request with a cap and only
+  // says it is gone on this request.
+  if (isRetired(thinkingMessage)) return { status: 'retired', modelId }
+  const blocks = Array.isArray(thinking.payload?.content) ? thinking.payload.content : undefined
+  if (blocks === undefined) {
+    if (!/thinking/i.test(thinkingMessage)) {
+      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
+    }
+    // The endpoint refused the `thinking` field, which means this model does
+    // not think. Ask again without it: an answer then is a measurement rather
+    // than a failure.
+    const plain = await postMessage({
+      model: modelId,
+      max_tokens: thinkingTokens,
+      messages: [{ role: 'user', content: THINKING_PROMPT }],
+    }, apiKey, { signal, fetchImpl })
+    const plainBlocks = Array.isArray(plain.payload?.content) ? plain.payload.content : undefined
+    if (plainBlocks === undefined) {
+      return { status: 'failed', modelId, reason: thinkingMessage || `HTTP ${thinking.status}` }
+    }
+    return { status: 'ok', modelId, maxTokens, supportsThinking: false }
   }
   return {
     status: 'ok',
@@ -1028,7 +1534,7 @@ export async function probeModel(modelId, apiKey, { signal, fetchImpl = fetch } 
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `node --test test/probe.test.js`
-Expected: PASS — 11 tests.
+Expected: PASS — 18 tests.
 
 - [ ] **Step 7: Commit**
 
@@ -1858,7 +2364,13 @@ export async function runSync(ctx, options = {}) {
 
   const state = await readStateFn(profileDir)
   const listed = currentModels(descriptor)
-  const candidateIds = (await fetchModelIds(apiKey, { signal: options.signal, fetchImpl: options.fetchImpl }))
+  const ids = await fetchModelIds(apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
+  if (ids === null) {
+    // The list could not be read. That is not an empty account, and it must
+    // not be mistaken for one.
+    return { ok: false, reason: 'model-list-failed' }
+  }
+  const candidateIds = ids
     .filter((id) => !listed.some((entry) => entry?.id === id) && !state.addedModels.includes(id))
 
   const entries = new Map()
