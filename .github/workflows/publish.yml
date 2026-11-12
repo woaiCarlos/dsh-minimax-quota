@@ -1,16 +1,39 @@
 name: Publish Package
 
-# Publishing uses npm trusted publishing (OIDC): this workflow never holds a
-# long-lived npm token. npm exchanges the runner's OIDC identity for a
-# short-lived, workflow-scoped publish token.
+# This plugin is distributed from this Git repository, not from npm. The
+# community catalog, the official plugin market and the local market all
+# install it by its repository URL, and every one of them reads that URL from
+# the catalog entry rather than from the registry.
 #
-# Setup on npmjs.com (one time), in the package settings:
+# The workflow is kept because the scope @woaicarlos is reserved for the day
+# a registry release is wanted, and because re-adding it later would mean
+# rebuilding the OIDC wiring from scratch. It is manual only, and it has
+# never been run.
+#
+# Two npm facts make the first release the awkward one, so they are written
+# down rather than rediscovered:
+#
+#   * npm cannot pre-configure a trusted publisher for a package that does
+#     not exist yet, so the FIRST release cannot use OIDC and has to be
+#     published by hand. npm's own issue #1926 is still open.
+#   * Every publish needs two-factor authentication, or a granular token
+#     with "bypass 2FA" enabled. A token without that flag is refused with
+#     403, and the registry does not send a challenge header, so an OTP
+#     argument does not help.
+#
+# So a first release needs: two-factor authentication on the account (or a
+# granular token with bypass 2FA), one manual publish, and then this
+# workflow for every release after it.
+#
+# Setup on npmjs.com (one time), after the first manual release, in the
+# package settings:
 #   Trusted Publisher -> GitHub Actions
 #     Organization or user : woaiCarlos
 #     Repository           : dsh-minimax-quota
 #     Workflow filename    : publish.yml
 #
-# Then publish by tagging:  git tag v1.0.0 && git push origin v1.0.0
+# Then publish by running this workflow, or by tagging:
+#   git tag v1.2.0 && git push origin v1.2.0
 
 on:
   # Manual only. The plugin is distributed from this Git repository, not from
