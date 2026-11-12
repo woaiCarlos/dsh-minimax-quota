@@ -3582,10 +3582,21 @@ node -e "
   const fs = require('fs');
   const file = 'git-plugins.json';
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const entry = (data.plugins ?? data).find ? (data.plugins ?? data).find(p => p.name === 'dsh-minimax-quota') : undefined;
+  // The index is a map keyed by package name, and the entry carries a
+  // flat commit field — not a list of versions.
+  const OLD = 'dsh-minimax-quota';
+  const NAME = 'dsh-minimax';
+  const entry = data[OLD];
   if (!entry) throw new Error('market entry not found');
   entry.version = '1.1.0';
-  entry.versions[0].commit = process.argv[1];
+  entry.commit = process.argv[1];
+  entry.publishTimestamp = new Date().toISOString();
+  entry.description = {
+    en: 'Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile\'s MiniMax model list current by appending newly released models.',
+    zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度，并把新发布的模型追加到配置的模型列表里。',
+  };
+  delete data[OLD];
+  data[NAME] = entry;
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 " "$sha"
 node generate-index.mjs
@@ -3608,7 +3619,7 @@ Expected: `ok, plugins: 15` (or whatever the current count is).
 ```bash
 cd "/Users/carlos/Documents/deepseek-harness/default-workspace/plugin-market"
 git add git-plugins.json index.json
-git commit -m "chore(market): point dsh-minimax-quota at the renamed bundle"
+git commit -m "chore(market): point dsh-minimax at the renamed bundle"
 ```
 
 ---
