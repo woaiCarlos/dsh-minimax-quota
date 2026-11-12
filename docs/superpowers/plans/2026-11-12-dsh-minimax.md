@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn the published `dsh-minimax-quota` bundle into `dsh-minimax`, which keeps the quota display and additionally appends newly released MiniMax models — with their real context window, output cap and thinking levels — to the pi-ai profile's model list, without ever overwriting or removing an entry the user already has.
+**Goal:** Turn the published `dsh-minimax-quota` bundle into `dsh-minimax`, which keeps the quota display and additionally appends newly released MiniMax models — with their real context window, output cap and thinking levels — to the pi-ai profile's model list, without ever overwriting or removing an entry the user already has. (The package name was renamed once more afterwards, to `@woaicarlos/dsh-minimax` — Task 11. The repository name never changed.)
 
 **Architecture:** The Host half owns every network call, because the API key lives in the Host credential store. It probes MiniMax for each newly seen model id, turns the probe result plus a built-in spec snapshot into a pi-ai model entry, and appends the entries to `providers.minimax-cn.models` through `settings.write('llm-pi-ai', …)`. The Browser half keeps its quota pill and gains a models section that lists the synced ids and shows a notice marker when models were added.
 
@@ -14,7 +14,7 @@
 
 - The bundle declares **no** runtime dependencies. It is installed as a `link:` into a workspace directory, where a declared dependency would not resolve.
 - The API key **never** appears in the repository, in the browser payload, or in any log line. Only the credential *reference* `MINIMAX_CN_API_KEY` is stored.
-- The browser half's module id **must** equal the package name (`dsh-minimax`). The Loader resolves the client half by package name.
+- The browser half's module id **must** equal the package name (`@woaicarlos/dsh-minimax`). The Loader resolves the client half by package name.
 - Every model entry the plugin writes **must** pass pi-ai's `modelProfile` schema: `id` (string), `name` (string), `contextWindow` (positive integer), `maxTokens` (positive integer), `input` (array of `text`/`image` only), `reasoningEfforts` (`false` or a level map whose values are valid wire spellings), `compat` (optional object).
 - `compat` must be **omitted entirely** when unused — js-yaml cannot serialize an `undefined` value, and `configEditor.edit` would throw.
 - The plugin never removes, reorders or changes the value of an entry that is already in the user's list, and never re-adds a model the user deleted by hand. The entries the user wrote are taken from the **raw profile override**, not from the schema-resolved projection, so a materialised default never changes their wording; the route's schema defaults are materialised into the patch by the write, and the README says so.
@@ -2894,9 +2894,9 @@ test('the daily sweep is registered as an effect of its own', async () => {
     // The startup attempt and the daily sweep are two separate effects, so
     // unloading the plugin cancels both of them.
     assert.deepEqual(ctx.effectLabels, [
-      'dsh-minimax: routes',
-      'dsh-minimax: first sync',
-      'dsh-minimax: daily sync',
+      '@woaicarlos/dsh-minimax: routes',
+      '@woaicarlos/dsh-minimax: first sync',
+      '@woaicarlos/dsh-minimax: daily sync',
     ])
   } finally {
     disposeAll(ctx)
@@ -2925,7 +2925,7 @@ test('the daily sweep runs one sync when the day elapses', async (t) => {
     await apply(ctx, {})
     // The startup attempt is called off, so the only sync that can run is
     // the daily sweep.
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
 
     // The day has not passed yet, so nothing has run.
     t.mock.timers.tick(DAY_MS - 1)
@@ -2976,7 +2976,7 @@ test('a second sweep does not probe a model the plugin already added', async (t)
   }
   try {
     await apply(ctx, {})
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
 
     // The first sweep measures the model MiniMax offers and adds it.
     t.mock.timers.tick(DAY_MS)
@@ -3105,7 +3105,7 @@ test('the daily sweep stops when the plugin is disposed while it is running', as
     await apply(ctx, {})
     // The startup attempt is called off, so the only sync that can run is
     // the daily sweep.
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
     t.mock.timers.tick(DAY_MS)
     await waitUntil(() => requests.includes('probe'))
 
@@ -3237,7 +3237,7 @@ test('a retired model is probed once and then remembered', async (t) => {
   }
   try {
     await apply(ctx, {})
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
 
     // The first sweep meets the retired model and probes it.
     t.mock.timers.tick(DAY_MS)
@@ -3280,13 +3280,13 @@ test('the daily sweep leaves one line on the Host log', async (t) => {
   globalThis.fetch = fakeFetch
   try {
     await apply(ctx, {})
-    disposeEffect(ctx, 'dsh-minimax: first sync')
+    disposeEffect(ctx, '@woaicarlos/dsh-minimax: first sync')
     t.mock.timers.tick(DAY_MS)
     await waitUntil(() => dailyTimers(watcher).length === 2)
     // The line says how many models were added, so a day that added three
     // does not read like a day that added none.
     assert.equal(ctx.infos.length, 1)
-    assert.equal(ctx.infos[0][1], 'dsh-minimax: the daily sync added')
+    assert.equal(ctx.infos[0][1], '@woaicarlos/dsh-minimax: the daily sync added')
     assert.equal(ctx.infos[0][2], 1)
   } finally {
     globalThis.fetch = originalFetch
@@ -3312,7 +3312,7 @@ test('the startup sync leaves one line on the Host log', async (t) => {
     // The first attempt waits two seconds before it runs.
     t.mock.timers.tick(2000)
     await waitUntil(() => ctx.infos.length > 0)
-    assert.equal(ctx.infos[0][1], 'dsh-minimax: the startup sync added')
+    assert.equal(ctx.infos[0][1], '@woaicarlos/dsh-minimax: the startup sync added')
     // The line says how many models were added.
     assert.equal(ctx.infos[0][2], 1)
   } finally {
@@ -3338,7 +3338,7 @@ test('the manual sync leaves one line on the Host log', async () => {
     const res = fakeResponse()
     await sync.handler(fakeRequest('POST'), res)
     assert.equal(ctx.infos.length, 1)
-    assert.equal(ctx.infos[0][1], 'dsh-minimax: the manual sync added')
+    assert.equal(ctx.infos[0][1], '@woaicarlos/dsh-minimax: the manual sync added')
     // The line says how many models were added.
     assert.equal(ctx.infos[0][2], 1)
   } finally {
@@ -3398,10 +3398,10 @@ test('the config schema describes itself for the settings service', async () => 
   // and the row stays invisible in the Settings UI.
   assert.equal(typeof Config.toJSON, 'function')
   const json = Config.toJSON()
-  assert.equal(json.uid, 'dsh-minimax.config')
-  assert.equal(json.refs[json.uid].dict.credentialRef, 'dsh-minimax.credentialRef')
+  assert.equal(json.uid, '@woaicarlos/dsh-minimax.config')
+  assert.equal(json.refs[json.uid].dict.credentialRef, '@woaicarlos/dsh-minimax.credentialRef')
   // The field is volatile, so it can be edited without remounting the plugin.
-  assert.equal(json.refs['dsh-minimax.credentialRef'].meta.volatile, true)
+  assert.equal(json.refs['@woaicarlos/dsh-minimax.credentialRef'].meta.volatile, true)
   // Every reference the description names has to exist, or the service
   // cannot rebuild the schema.
   for (const ref of Object.values(json.refs)) {
@@ -3605,11 +3605,11 @@ function logSync(ctx, label, result) {
     return
   }
   if (result?.ok !== true) {
-    ctx.logger?.warn?.('%s: %s', `dsh-minimax: ${label} failed`, result?.reason ?? 'unknown')
+    ctx.logger?.warn?.('%s: %s', `@woaicarlos/dsh-minimax: ${label} failed`, result?.reason ?? 'unknown')
     return
   }
   const added = Array.isArray(result.added) ? result.added.length : 0
-  ctx.logger?.info?.('%s: %d', `dsh-minimax: ${label} added`, added)
+  ctx.logger?.info?.('%s: %d', `@woaicarlos/dsh-minimax: ${label} added`, added)
 }
 
 /** The sync that is running right now, so a second caller waits for it. */
@@ -3807,7 +3807,7 @@ export async function apply(ctx, config) {
   // so the route is never silently skipped.
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
-    throw new Error('dsh-minimax: the webServer service is unavailable, so the routes cannot be registered')
+    throw new Error('@woaicarlos/dsh-minimax: the webServer service is unavailable, so the routes cannot be registered')
   }
 
   const send = (res, payload, status = 200) => {
@@ -3834,7 +3834,7 @@ export async function apply(ctx, config) {
           // leave the browser's request pending forever and stop its polling.
           // The browser only learns that the request failed: the message
           // belongs on the Host side, where the operator can read it.
-          reportFailure(ctx, 'dsh-minimax: the status route failed', error)
+          reportFailure(ctx, '@woaicarlos/dsh-minimax: the status route failed', error)
           send(res, {
             quota: { ok: false, reason: 'request-failed' },
             models: { synced: [], added: [], syncedAt: null },
@@ -3863,25 +3863,25 @@ export async function apply(ctx, config) {
         } catch (error) {
           // The browser only ever receives a fixed reason, so a failure nobody
           // anticipated cannot carry an internal message into the page.
-          reportFailure(ctx, 'dsh-minimax: the sync route failed', error)
+          reportFailure(ctx, '@woaicarlos/dsh-minimax: the sync route failed', error)
           send(res, { ok: false, reason: 'sync-failed' })
         }
       },
     }),
   ]
-  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax: routes')
+  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, '@woaicarlos/dsh-minimax: routes')
 
   // The profile may still be loading, so the first sync waits for the pi-ai
   // namespace to appear before it gives up. The pending attempt is called off
   // with the plugin, so a plugin that is unloaded inside that window never
   // writes the profile afterwards.
   const cancelFirstSync = scheduleSync(ctx, credentialRef)
-  ctx.effect(() => cancelFirstSync, 'dsh-minimax: first sync')
+  ctx.effect(() => cancelFirstSync, '@woaicarlos/dsh-minimax: first sync')
 
   // The plugin also probes once a day, so a model MiniMax releases while the
   // plugin is running still arrives without the user restarting anything.
   const cancelDailySync = scheduleDailySync(ctx, credentialRef)
-  ctx.effect(() => cancelDailySync, 'dsh-minimax: daily sync')
+  ctx.effect(() => cancelDailySync, '@woaicarlos/dsh-minimax: daily sync')
 }
 
 /**
@@ -3943,7 +3943,7 @@ function scheduleSync(ctx, credentialRef) {
         if (controller.signal.aborted) return
         // A failed sync must never take the plugin down; the next attempt
         // tries again. The failure is not swallowed: it goes to the log.
-        reportFailure(ctx, 'dsh-minimax: the startup sync failed', error)
+        reportFailure(ctx, '@woaicarlos/dsh-minimax: the startup sync failed', error)
       }
     }
   }
@@ -4046,9 +4046,9 @@ const CredentialRefSchema = {
   meta: { volatile: true },
   toJSON() {
     return {
-      uid: 'dsh-minimax.credentialRef',
+      uid: '@woaicarlos/dsh-minimax.credentialRef',
       refs: {
-        'dsh-minimax.credentialRef': { type: 'string', meta: { volatile: true } },
+        '@woaicarlos/dsh-minimax.credentialRef': { type: 'string', meta: { volatile: true } },
       },
     }
   },
@@ -4070,21 +4070,21 @@ const CredentialRefSchema = {
 const Config = {
   '~standard': {
     version: 1,
-    vendor: 'dsh-minimax',
+    vendor: '@woaicarlos/dsh-minimax',
     validate(value) {
       const raw = value === undefined || value === null ? {} : value
       if (typeof raw !== 'object' || Array.isArray(raw)) {
-        return { issues: [{ message: 'dsh-minimax: config must be an object' }] }
+        return { issues: [{ message: '@woaicarlos/dsh-minimax: config must be an object' }] }
       }
       const issues = []
       const config = {}
       for (const [key, entry] of Object.entries(raw)) {
         if (key !== 'credentialRef') {
-          issues.push({ message: `dsh-minimax: unknown config field "${key}"`, path: [key] })
+          issues.push({ message: `@woaicarlos/dsh-minimax: unknown config field "${key}"`, path: [key] })
           continue
         }
         if (typeof entry !== 'string' || entry.length === 0) {
-          issues.push({ message: 'dsh-minimax: credentialRef must be a non-empty string', path: [key] })
+          issues.push({ message: '@woaicarlos/dsh-minimax: credentialRef must be a non-empty string', path: [key] })
           continue
         }
         if (!CREDENTIAL_REF_PATTERN.test(entry)) {
@@ -4093,7 +4093,7 @@ const Config = {
           // nothing, so it would read as a missing credential while the key
           // itself sat in plain text in the profile patch.
           issues.push({
-            message: `dsh-minimax: credentialRef "${entry}" must be a credential reference name (letters, digits and underscores, not starting with a digit)`,
+            message: `@woaicarlos/dsh-minimax: credentialRef "${entry}" must be a credential reference name (letters, digits and underscores, not starting with a digit)`,
             path: [key],
           })
           continue
@@ -4110,14 +4110,14 @@ const Config = {
   dict: { credentialRef: CredentialRefSchema },
   toJSON() {
     return {
-      uid: 'dsh-minimax.config',
+      uid: '@woaicarlos/dsh-minimax.config',
       refs: {
-        'dsh-minimax.config': {
+        '@woaicarlos/dsh-minimax.config': {
           type: 'object',
           meta: {},
-          dict: { credentialRef: 'dsh-minimax.credentialRef' },
+          dict: { credentialRef: '@woaicarlos/dsh-minimax.credentialRef' },
         },
-        'dsh-minimax.credentialRef': { type: 'string', meta: { volatile: true } },
+        '@woaicarlos/dsh-minimax.credentialRef': { type: 'string', meta: { volatile: true } },
       },
     }
   },
@@ -5044,7 +5044,7 @@ async function loadClient({ storage } = {}) {
   const evaluate = new Function('window', 'document', source)
   evaluate(fakeWindow, fakeDocument)
   assert.ok(captured !== null, 'the client half did not register itself')
-  assert.equal(captured.id, 'dsh-minimax')
+  assert.equal(captured.id, '@woaicarlos/dsh-minimax')
   return { module: captured, window: fakeWindow }
 }
 
@@ -5691,7 +5691,7 @@ The plan carries the committed file, byte for byte, so the plan and the code can
  * talks to those routes.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-minimax',
+  id: '@woaicarlos/dsh-minimax',
   factory(require) {
     const React = require('react')
     const h = React.createElement
@@ -5808,7 +5808,7 @@ window.__ModuleLoader__.load({
       const tagId = 'dsh-minimax/client.css'
       if (document.querySelector(`style[data-plugin-css=${JSON.stringify(tagId)}]`) !== null) return
       const tag = document.createElement('style')
-      tag.dataset.plugin = 'dsh-minimax'
+      tag.dataset.plugin = '@woaicarlos/dsh-minimax'
       tag.dataset.pluginCss = tagId
       tag.textContent = CSS
       document.head.appendChild(tag)
@@ -6606,6 +6606,11 @@ details panel lists the models the profile currently holds."
 
 The package name changes so the bundle can carry both jobs. The GitHub repository URL does not change, so the community catalog pull request stays valid.
 
+> **Superseded in part by Task 11.** The package name was renamed once more afterwards, to
+> `@woaicarlos/dsh-minimax`, because the unscoped `dsh-minimax` belongs to another author. Every
+> value quoted in this task is the one the tree carries today; the blocks that reproduce a whole
+> file are byte for byte the committed file.
+
 **Files:**
 - Modify: `package.json`
 - Modify: `client.js`
@@ -6617,17 +6622,17 @@ The package name changes so the bundle can carry both jobs. The GitHub repositor
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: a bundle whose package name, client module id and patch row id all read `dsh-minimax` / `minimax`.
+- Produces: a bundle whose package name, client module id and patch row id all read `@woaicarlos/dsh-minimax` / `minimax`.
 
 - [ ] **Step 1: Rename the package**
 
-In `package.json`, change `"name": "dsh-minimax-quota"` to `"name": "dsh-minimax"`, and update the description to cover both jobs:
+In `package.json`, change `"name": "dsh-minimax-quota"` to `"name": "@woaicarlos/dsh-minimax"`, and update the description to cover both jobs:
 
 ```json
   "description": "Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile's MiniMax model list current by appending newly released models.",
 ```
 
-Bump the version to `1.1.0`.
+Bump the version to `1.1.2`.
 
 The `files` array must ship every runtime import — `lib/`, the locale files, the icon, the patch — and
 every file the READMEs link relatively, and nothing else. npm always leaves `package-lock.json` out of
@@ -6658,30 +6663,29 @@ directories they live in — `docs/` also holds the plan and the design document
 In `client.js`, change the module id:
 
 ```js
-  id: 'dsh-minimax',
+  id: '@woaicarlos/dsh-minimax',
 ```
 
 This must equal the package name exactly, or the Loader cannot find the browser half.
 
-In `index.js`, the Host still labels itself `dsh-minimax-quota` in its error messages
-and in the schema vendor, while the package is named `dsh-minimax` from now on.
-Bring the two into step:
+In `index.js`, the Host labels itself in its error messages
+and in the schema vendor, and both have to carry the package name. Bring the two into step:
 
 ```bash
-sed -i '' "s/dsh-minimax-quota:/dsh-minimax:/g; s/vendor: 'dsh-minimax-quota',/vendor: 'dsh-minimax',/g" index.js
+sed -i '' "s|dsh-minimax:|@woaicarlos/dsh-minimax:|g; s|dsh-minimax\.|@woaicarlos/dsh-minimax.|g; s|vendor: 'dsh-minimax'|vendor: '@woaicarlos/dsh-minimax'|g" index.js
 ```
 
-After the sed, `index.js` must contain no `dsh-minimax-quota` string. Verify with:
+After the sed, every label in `index.js` has to carry the scoped name. Verify with:
 
 ```bash
 grep -n "dsh-minimax" index.js
 ```
 
-Expected: every occurrence reads `dsh-minimax`, none reads `dsh-minimax-quota`.
+Expected: every occurrence reads `@woaicarlos/dsh-minimax`, none reads the bare `dsh-minimax`.
 
 - [ ] **Step 3: Rename the lockfile entry**
 
-The lockfile carries the package name in two places. Change both, so `npm ci` and
+The lockfile carries the package name in two places, and the version in two more. Change all four, so `npm ci` and
 `pnpm install` keep working:
 
 ```bash
@@ -6689,8 +6693,12 @@ node -e "
   const fs = require('fs');
   const file = 'package-lock.json';
   const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-  data.name = 'dsh-minimax';
-  if (data.packages && data.packages['']) data.packages[''].name = 'dsh-minimax';
+  data.name = '@woaicarlos/dsh-minimax';
+  data.version = '1.1.2';
+  if (data.packages && data.packages['']) {
+    data.packages[''].name = '@woaicarlos/dsh-minimax';
+    data.packages[''].version = '1.1.2';
+  }
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 "
 ```
@@ -6702,18 +6710,19 @@ In `cordis.patch.yml`:
 ```yaml
 - insert:
     - id: minimax
-      name: 'dsh-minimax'
+      name: '@woaicarlos/dsh-minimax'
       config:
         credentialRef: MINIMAX_CN_API_KEY
 ```
 
 - [ ] **Step 5: Update the plugin manifest**
 
-In `dsh-plugin.json`, change the `id` and the `name` to read `dsh-minimax`, and update the `description` to mention the model sync. Keep the `version` in step with `package.json`.
+In `dsh-plugin.json`, change the `name` to read `@woaicarlos/dsh-minimax`, and keep the `version` in step with `package.json`. The `id` (`com.woaicarlos.dsh-minimax`) is the manifest's own identity and already carries the scope, so it stays.
 
 - [ ] **Step 6: Update the CI checks**
 
-In `.github/workflows/ci.yml`, the patch check asserts the old name. Replace it:
+In `.github/workflows/ci.yml`, the patch check asserts the package name. It reads the name out of
+`package.json` instead of repeating it, so the two can never drift apart:
 
 ```yaml
       - name: Validate the bundle patch
@@ -6721,8 +6730,9 @@ In `.github/workflows/ci.yml`, the patch check asserts the old name. Replace it:
           node -e "
             const fs = require('fs');
             const text = fs.readFileSync('cordis.patch.yml', 'utf8');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             if (!/^\s*-\s*insert:/m.test(text)) throw new Error('patch has no insert list');
-            if (!/name:\s*'dsh-minimax'/.test(text)) throw new Error('patch does not insert this package');
+            if (!text.includes(\"name: '\" + pkg.name + \"'\")) throw new Error('patch does not insert this package (' + pkg.name + ')');
             console.log('ok cordis.patch.yml');
           "
 ```
@@ -6763,7 +6773,10 @@ any other, so the exclusion goes:
 
 - [ ] **Step 7: Update the READMEs**
 
-In `README.md` and `README.en.md`, replace every mention of `dsh-minimax-quota` as the **package** name with `dsh-minimax`. Keep the repository URL (`woaiCarlos/dsh-minimax-quota`) unchanged everywhere, because that is what the catalog entry points at.
+In `README.md` and `README.en.md`, replace every mention of the **package** name with `@woaicarlos/dsh-minimax`. Keep the repository URL (`woaiCarlos/dsh-minimax-quota`) unchanged everywhere, because that is what the catalog entry points at — including the copy of the catalog entry that both READMEs inline.
+
+The READMEs also have to say why the **state file** still carries the old spelling, so that a reader
+does not take the mismatch for a bug. See Task 11.
 
 Add a section describing the new behaviour, in the language of the file:
 
@@ -6983,6 +6996,762 @@ git commit -m "chore(market): point dsh-minimax at the renamed bundle"
 
 ---
 
+## Task 11: Rename the package to `@woaicarlos/dsh-minimax`
+
+The unscoped npm name `dsh-minimax` belongs to another author (`dushaobindoudou`), and so do
+`dsh-minimax-quota` and `dsh-minimax-usage`. The package is therefore renamed to
+`@woaicarlos/dsh-minimax` — a scope that does not exist on npm yet, and so belongs to its owner.
+The plugin is distributed from GitHub, not from npm, so the rename keeps the name unambiguous and
+reserves the scope for a future registry release.
+
+**The repository keeps its name** (`woaiCarlos/dsh-minimax-quota`). The community catalog entry
+names the repository, not the package, so the catalog needs no change and no new pull request.
+
+**Files:**
+- Modify: `package.json` (`name`, `version`)
+- Modify: `package-lock.json` (`name`, `version`, `packages[""].name`, `packages[""].version`)
+- Modify: `client.js` (the browser module id, `tag.dataset.plugin`)
+- Modify: `index.js` (the `Config` schema's `vendor`, the log prefixes, the effect labels, the validation messages, the schema field uids)
+- Modify: `cordis.patch.yml` (the patch row's `name`)
+- Modify: `dsh-plugin.json` (`name`, `version`)
+- Modify: `README.md`, `README.en.md` (the title, the package name, the state-file note)
+- Modify: `.github/workflows/ci.yml` (the patch check reads the name out of `package.json`)
+- Modify: `test/client.test.js`, `test/sync.test.js` (the asserted module id, the effect labels, the schema uids)
+- Modify: `docs/superpowers/plans/2026-11-12-dsh-minimax.md` (this task)
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: a bundle whose identity points all read `@woaicarlos/dsh-minimax`.
+
+### The identity points
+
+| # | Where | Value |
+| --- | --- | --- |
+| 1 | `package.json`'s `name` | `@woaicarlos/dsh-minimax` |
+| 2 | `client.js`'s browser module id | `@woaicarlos/dsh-minimax` |
+| 3 | `client.js`'s `tag.dataset.plugin` | `@woaicarlos/dsh-minimax` |
+| 4 | `cordis.patch.yml`'s row `name` | `@woaicarlos/dsh-minimax` |
+| 5 | `dsh-plugin.json`'s `name` | `@woaicarlos/dsh-minimax` |
+| 6 | `index.js`'s `Config` schema `vendor` | `@woaicarlos/dsh-minimax` |
+| 7 | `index.js`'s `Config` schema field uids | `@woaicarlos/dsh-minimax.config`, `@woaicarlos/dsh-minimax.credentialRef` |
+
+Points 2 and 3 are functional, not cosmetic:
+
+- The Host half looks the browser half up by the module id. If the id and the package name
+  disagree, the browser half never loads and the plugin renders nothing — with no error.
+- The Harness loader's `removeOwnedStyles(id)` matches `style[data-plugin]` against the
+  **package** id, so a stale `dataset.plugin` would strand the style tag on reload.
+
+### What deliberately does not change
+
+| Thing | Why |
+| --- | --- |
+| The repository name and every URL pointing at it — `package.json`'s `repository` / `homepage` / `bugs`, `dsh-plugin.json`'s `source.repository`, `catalog/awesome-dsh-plugin.yml`, `publish.yml`'s trusted-publisher comment, the READMEs' clone and install commands | The community catalog entry names the repository, so it stays valid and no new pull request is needed. |
+| The routes `/plugin/minimax/status` and `/plugin/minimax/sync` | A route is not an identity. Changing it would break existing bookmarks and open pages. |
+| The state file `dsh-minimax-state.json` (`lib/state.js`) | **User data.** It is what remembers which models the plugin added, and what stops a model the user deleted by hand from coming back. Renaming it would silently break that promise for every existing install. Both READMEs now say so, so that a reader is not confused by the mismatch. |
+| The local-storage key `dsh-minimax.seen-models` (`client.js`) | The same reason: the browser-side memory of which models the user was told about. |
+| The style tag id `dsh-minimax/client.css` (`client.js`) | A local identifier for the plugin's own style element, not an identity any service looks up. Changing it would strand the old style tag in an open page. |
+| The manifest id `com.woaicarlos.dsh-minimax` (`dsh-plugin.json`) | The manifest's own identity, and it already carries the scope. |
+| Zero runtime dependencies | Unchanged. |
+| The API key never reaching the browser, the repository or a log line | Unchanged. |
+
+### The files, byte for byte
+
+The plan carries the committed files, so the plan and the code cannot drift apart. Every block below
+is the committed file, byte for byte.
+
+`package.json`:
+
+```json
+{
+  "name": "@woaicarlos/dsh-minimax",
+  "version": "1.1.2",
+  "description": "Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile's MiniMax model list current by appending newly released models.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "minimax",
+    "quota",
+    "usage",
+    "web-ui"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "LICENSE",
+    "README.en.md",
+    "README.md",
+    "catalog/awesome-dsh-plugin.yml",
+    "client.js",
+    "cordis.patch.yml",
+    "dsh-plugin.json",
+    "docs/market-entry.png",
+    "docs/screenshot-panel.png",
+    "icon.svg",
+    "index.js",
+    "lib",
+    "locale/*.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/woaiCarlos/dsh-minimax-quota.git"
+  },
+  "homepage": "https://github.com/woaiCarlos/dsh-minimax-quota#readme",
+  "bugs": {
+    "url": "https://github.com/woaiCarlos/dsh-minimax-quota/issues"
+  },
+  "engines": {
+    "node": ">=20.18"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\" && node --check index.js && node --check client.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
+```
+
+`package-lock.json`:
+
+```json
+{
+  "name": "@woaicarlos/dsh-minimax",
+  "version": "1.1.2",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "@woaicarlos/dsh-minimax",
+      "version": "1.1.2",
+      "license": "MIT",
+      "engines": {
+        "node": ">=20.18"
+      }
+    }
+  }
+}
+```
+
+`dsh-plugin.json`:
+
+```json
+{
+  "$schema": "https://dsh.community/schemas/dsh-plugin-0.15.json",
+  "id": "com.woaicarlos.dsh-minimax",
+  "name": "@woaicarlos/dsh-minimax",
+  "version": "1.1.2",
+  "description": "Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile's MiniMax model list current by appending newly released models.",
+  "manifestVersion": "0.15",
+  "facets": {
+    "host": {
+      "entry": "index.js",
+      "apiVersion": "v1alpha1"
+    }
+  },
+  "subscriptions": [],
+  "license": "MIT",
+  "source": {
+    "repository": "https://github.com/woaiCarlos/dsh-minimax-quota"
+  }
+}
+```
+
+`README.md`:
+
+````markdown
+# @woaicarlos/dsh-minimax
+
+在 DeepSeek Harness 的对话输入框下方，显示 **MiniMax 编程套餐（Coding Plan）剩余额度**：5 小时滚动窗口和周窗口各剩多少百分比。点击后弹出详情面板。同时，插件会探测 MiniMax 新发布的模型，把它们自动补进你的 pi-ai 模型列表。
+
+![药丸与详情面板](docs/screenshot-panel.png)
+
+- 只在当前会话选中 **MiniMax 系列模型**时出现（provider 或模型名含 `minimax`）。
+- 药丸显示 `5小时 95% · 周 37%`，两个数字各带一个状态圆点：绿（>40%）、橙（≤40%）、红（≤15%）。
+- 点击弹出面板：每个窗口的剩余百分比、进度条、距离重置还有多久、数据更新时间。
+- 支持明暗主题；界面文案走 Harness 的 locale 服务（内置中英文）。
+- 还会自动把 MiniMax 新发布的模型补进配置里的模型列表 —— 只追加：不删除、不重排；条目本身按原样写回，除非 profile override 里没写过自己的 MiniMax 模型列表（见下文「模型自动补充」）。
+
+## 安装
+
+插件通过 **GitHub 仓库**分发，不依赖 npm。包名是 `@woaicarlos/dsh-minimax`（npm 上的 `@woaicarlos`
+作用域尚未开通，这个名字先占住，将来真要发到 npm 时直接用）；**仓库名仍然是 `dsh-minimax-quota`** ——
+安装、克隆和社区目录条目用的都是仓库名，不受包名改动影响：
+
+```bash
+dsh plugin --profile <你的 profile> add github:woaiCarlos/dsh-minimax-quota
+```
+
+或者克隆后从本地目录安装：
+
+```bash
+git clone https://github.com/woaiCarlos/dsh-minimax-quota.git
+dsh plugin --profile <你的 profile> add file:./dsh-minimax-quota
+```
+
+装完后在 **插件 → 已安装插件** 里能看到「MiniMax 额度」，开关打开即生效；重启 Harness 也生效。
+
+> 如果你的 Profile 里还没有 MiniMax 路由，先在 **设置 → 模型** 里加一个 MiniMax 供应商并填入 API Key，插件才有额度可读。
+
+## 出现在插件市场里
+
+插件已经收录在本地插件市场的「发现」标签页里（索引条目带 commit 锁定的 GitHub 源，点一下就能装）。
+
+![插件市场条目](docs/market-entry.png)
+
+如果你想让它出现在**社区插件市场**（awesome-dsh-plugin 目录，第三方市场按这个目录做发现），需要给
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 提一个 PR，
+只加一个文件即可：
+
+```yaml
+# data/plugins/woaiCarlos__dsh-minimax-quota.yml
+url: https://github.com/woaiCarlos/dsh-minimax-quota
+name: woaiCarlos/dsh-minimax-quota
+category: usage
+description:
+  en: 'Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile''s MiniMax model list current by appending newly released models.'
+  zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度，并把新发布的模型追加到配置的模型列表里。'
+icon: https://raw.githubusercontent.com/woaiCarlos/dsh-minimax-quota/main/assets/icon-180.png
+```
+
+现成的文件在 [`catalog/awesome-dsh-plugin.yml`](catalog/awesome-dsh-plugin.yml)，直接复制改名即可。
+仓库已经打了 `dsh-plugin` topic。
+
+该目录的 CI 会检查**仓库至少存在满 1 天**，本仓库创建于 2026-11-10 09:04 UTC，
+所以 PR 需要在 2026-11-11 09:04 UTC 之后提交。
+
+另外，本地市场索引的生成脚本 `plugin-market/generate-index.mjs` 支持 Git 源的条目
+（输入 `git-plugins.json`），用 DSH 自带的索引校验器校验后才写出 `index.json`。
+
+## 发版
+
+插件的**分发渠道就是这个 Git 仓库**，不是 npm。改完代码直接提交、发版即可：
+
+```bash
+git commit -am "..." && git push
+```
+
+插件市场索引里的版本条目用 commit SHA 锁定，所以每次发版后把
+`plugin-market/git-plugins.json` 里的 `commit` 更新成新的 SHA，再重新生成索引：
+
+```sh
+cd plugin-market
+DSH_MARKET_ON_DEMAND="$PWD/on-demand.json" node generate-index.mjs
+```
+
+### 如果以后还想发到 npm
+
+仓库里已经备好了 npm 官方的 **Trusted Publishing（OIDC）**工作流
+（`.github/workflows/publish.yml`），CI 里不保存任何长期 npm token：
+
+一次性配置（npmjs.com 的包设置页）：
+
+发布时用的包名是 `@woaicarlos/dsh-minimax`。
+
+| 字段 | 值 |
+| --- | --- |
+| Select your publisher | GitHub Actions |
+| Organization or user | `woaiCarlos` |
+| Repository | `dsh-minimax-quota` |
+| Workflow filename | `publish.yml` |
+
+该工作流目前是**手动触发**（`workflow_dispatch`），因为包还不在 npm 上，
+自动触发只会在每次打 tag 时失败。发包成功后可以改成 tag 触发：
+
+```yaml
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+```
+
+首次发布（包还不存在，Trusted Publisher 还没法配）用一次性验证码：
+
+```bash
+npm publish --otp=<验证器 App 的 6 位码>
+```
+
+## 你的 API Key 会不会泄露
+
+**不会。** 具体说：
+
+1. **仓库里没有任何密钥。** 插件源码只出现一个**凭据引用名** `MINIMAX_CN_API_KEY`，它是「查哪个钥匙」的名字，不是钥匙本身。发布前已对整个目录做过密钥扫描，`sk-…` 形式的实际密钥一个都没有。
+
+2. **密钥只存在于宿主进程。** 读取密钥的是 Host 半侧，通过 `ctx.credentials.resolve('MINIMAX_CN_API_KEY')` 从 Harness 的凭据存储里取，取到的值只用来拼 `Authorization: Bearer …` 请求头发给 MiniMax，**不会出现在路由返回的 JSON 里**。
+
+3. **浏览器全程拿不到密钥。** 浏览器只请求同源路由 `/plugin/minimax/status`，拿到的只有百分比和重置时间戳：
+
+   ```json
+   {
+     "ok": true,
+     "intervalRemainingPercent": 95,
+     "weeklyRemainingPercent": 37,
+     "intervalResetAt": 1794316261854,
+     "weeklyResetAt": 1794407213154,
+     "intervalStatus": 1,
+     "weeklyStatus": 1,
+     "fetchedAt": 1794300583689
+   }
+   ```
+
+   路由路径在服务端注册，密钥不会随响应下发。
+
+### 安装后会自动识别吗
+
+**会，前提是你的 MiniMax Key 是用「标准方式」配置的**——因为 Harness 自己的凭据存储就是按环境变量名寻址的：
+
+| 你怎么配的 Key | 插件能不能读到 |
+| --- | --- |
+| 在 **设置 → 模型** 里给 MiniMax 填了 Key | ✅ 能，**无需额外操作** |
+| 启动前 `export MINIMAX_CN_API_KEY=sk-…` | ✅ 能 |
+| 项目目录 `.env` 或 `~/.dsh/.env` 里写了 | ✅ 能 |
+| 存在别的名字的环境变量里 | ❌ 需要改配置，见下 |
+
+原因是 Harness 的 **模型设置页** 在你给 `minimax-cn` 这条路由填 Key 时，写入的引用名是按路由 id 推导出来的：
+
+```
+minimax-cn  →  MINIMAX_CN_API_KEY
+```
+
+正好就是本插件查找的名字，所以**你只要在模型设置里配好了 MiniMax，装上插件就能直接用**，插件自己不会去猜别的 key。
+
+查找顺序（Harness 凭据存储的固定优先级，第一个有值的胜出）：
+
+```
+1. 已存储的凭据文件   ~/.dsh/.credentials.yaml   ← 模型设置页写的就是这里
+2. 启动时的环境变量   MINIMAX_CN_API_KEY=… dsh
+3. 项目目录的 .env    <启动目录>/.env
+4. 家目录的 .env      $DSH_HOME/.env
+```
+
+### 换一个引用名
+
+如果你把 Key 存在了别的环境变量名里，改插件配置即可，在 `cordis.patch.yml` 里：
+
+```yaml
+- insert:
+    - id: minimax
+      name: '@woaicarlos/dsh-minimax'
+      config:
+        credentialRef: MY_MINIMAX_KEY
+```
+
+## 配置
+
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `credentialRef` | `MINIMAX_CN_API_KEY` | 要读取的凭据引用名。凭据存储里的引用名：字母、数字和下划线，且不能以数字开头。 |
+
+## 工作原理
+
+```
+index.js    Host 半侧：解析凭据 → 调 MiniMax → 通过同源路由 /plugin/minimax/status 返回额度
+client.js   浏览器半侧：在对话输入框下方注册一个药丸，点击弹出详情面板
+locale/     中英文文案
+```
+
+### 模型自动补充
+
+插件会探测 MiniMax 新发布的模型，把它们追加到 pi-ai 配置的 `providers.minimax-cn.models` 里。
+每个新模型都会实测：是否还能调用、单次最大输出是多少、是否支持思考。
+**你已有的条目不会被删除、不会被重排** —— 插件只追加；条目的值也不会被改写，除非 profile override 里没写过自己的 MiniMax 模型列表（见下一段）。手动删掉的模型也不会被加回来。
+
+写回时有几处需要说明：pi-ai schema 解析出来的**路由级默认值**（`defaultContextWindow`、`defaultMaxTokens` 等）
+会随这次写入一并落到 profile patch 的那条路由上；这次写入写进 patch 的是**整张生效的 providers 表**，
+所以**你其它每一条 provider 路由**（包括只在继承层里配置过的那条）也会一起写进去并各自带上 schema 解析出来的默认值，
+而当 profile override 自己没写过 MiniMax 模型列表时，写回的是生效投影里已经带着物化 `compat` 块的条目。
+
+**模型条目本身按原样写回** —— 但这只在 profile override 自己写过 MiniMax 模型列表时成立。
+
+### 同步的节奏
+
+| 时机 | 会发生什么 |
+| --- | --- |
+| 插件启动后 | 等 profile 加载完，自动同步一次（最多重试 5 次） |
+| 每 24 小时 | 自动扫描一次 MiniMax 的模型列表，有新模型就追加 |
+| 面板里的「立即同步」 | 立刻同步一次，成功或失败都会在面板上给出提示 |
+
+安静的一天只花 **1 次模型列表请求**：已追加过的模型、以及 MiniMax 已下线的模型，都记在插件自己的状态文件里，不会再探测。
+MiniMax 已下线的模型只探测一次就记下结论，所以它不会每天再花两次请求。
+
+### 状态文件
+
+插件的簿记写在 profile 目录下的一个文件里，不落在你的 profile patch 里：
+
+```
+<profileDir>/dsh-minimax-state.json
+{ "addedModels": ["MiniMax-M3.1-Flash"], "retiredModels": ["MiniMax-M2"], "lastSyncAt": 1760000000000 }
+```
+
+`addedModels` 记着插件追加过哪些模型 —— **你手动删掉的模型因此不会被加回来**；`retiredModels` 记着 MiniMax 已经下线的模型。
+**删掉这个文件等于忘掉这些记录**：手动删掉的模型会在下次同步时重新出现，已下线的模型也会被重新探测一次。
+
+文件名里的 `dsh-minimax` 是**改包名之前的旧包名**，故意没有跟着改。这个文件是你自己的数据：
+一旦改名，插件就会读不到它，于是忘记自己追加过哪些模型，你手动删掉的模型会被悄悄加回来。
+换包名不会换这个文件，升级到新版本也不用改它。
+
+### 数据来源
+
+MiniMax 官方没有公开这个接口，是从其控制台前端产物里逆出来的（未文档化，可能变动）：
+
+```
+GET https://api.minimaxi.com/v1/coding_plan/remains
+Authorization: Bearer <你的 Key>
+```
+
+关键字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `model_remains[].current_interval_remaining_percent` | 5 小时窗口剩余百分比（**已经是剩余值**，不要再减 100） |
+| `model_remains[].current_weekly_remaining_percent` | 周窗口剩余百分比 |
+| `model_remains[].end_time` / `weekly_end_time` | 两个窗口的重置时间（epoch 毫秒） |
+| `model_remains[].current_weekly_status` | 1 = 正常，2 = 周额度已用尽，**3 = 该套餐没有周额度**（此时不显示周那一档） |
+| `base_resp.status_code` | 0 = 成功。**这个接口鉴权失败也返回 HTTP 200**，所以必须看 body 里的这个字段 |
+
+代码里配了三个等价路径互相兜底（`coding_plan/remains`、`api/openplatform/coding_plan/remains`、`token_plan/remains`），因为路径随时可能变。
+
+### 一些实现细节
+
+- **Host 半侧声明了 `inject: ['webServer', 'credentials', 'settings', 'profileContext']`。** 这是必需的：`webServer` 服务由 web 应用包提供，可能晚于本插件加载；不声明依赖的话插件会在启动时抢跑，拿不到服务就静默跳过，路由注册不上（表现为界面显示「无法连接」）。`profileContext` 同样要声明：插件的簿记文件放在 profile 目录里，没有这个服务，插件会忘掉自己追加过哪些模型，于是你手动删掉的模型会被悄悄加回来。
+- **额度每 60 秒刷新一次**，鼠标移到药丸上或点击时也会重新拉一次。
+- **只在选中 MiniMax 模型时显示**；没有套餐额度（比如按量计费的账号）时整个药丸隐藏，不会显示空读数。
+- 额度那部分是纯展示：不写任何会话事件，不改当前选中的模型，不参与 prompt。模型补充只往 profile 的 MiniMax 模型列表末尾追加条目。
+- **每次同步都会在 Host 日志里记一行**，写明这次追加了几个模型；同步失败也会记下来（失败原因记在 Host 日志里，浏览器只看到一个固定提示）。
+
+## 已知限制
+
+- 只支持 MiniMax **国内版**（`api.minimaxi.com`）。国际版 `api.minimax.io` 是另一套账号体系，密钥不通用。
+- 走的是未公开接口，MiniMax 改路径后需要更新 `index.js` 里的 `QUOTA_ENDPOINTS`。
+- 纯按量计费（BYOK）账号没有套餐额度，插件会自动隐藏。
+
+## License
+
+MIT
+````
+
+`README.en.md`:
+
+````markdown
+# @woaicarlos/dsh-minimax
+
+Shows the remaining **MiniMax Coding Plan quota** below the DeepSeek Harness chat composer: how much is left in the rolling 5-hour window and in the weekly window. Click the pill for the details. It also watches for models MiniMax has just released and appends them to your pi-ai model list.
+
+![Pill and details panel](docs/screenshot-panel.png)
+
+- Appears only when the session has a **MiniMax-family model** selected (provider or model name contains `minimax`).
+- The pill reads `5h 95% · Week 37%`, each number with a status dot: green (>40%), amber (≤40%), red (≤15%).
+- Clicking opens a panel: remaining percentage per window, a progress bar, time until each window resets, and when the reading was fetched.
+- Follows the host light/dark theme; all visible text goes through the Harness locale service (Chinese and English included).
+- It also appends newly released MiniMax models to your configured model list — append only: nothing is removed, nothing is reordered, and the entries themselves come back as they are unless your profile override carries no MiniMax model list of its own (see "Automatic model sync" below).
+
+## Install
+
+The plugin is distributed from **this Git repository**, not from npm. The package name is
+`@woaicarlos/dsh-minimax` (the `@woaicarlos` scope does not exist on npm yet — the name is reserved
+for it, and a future registry release would use it as it stands); **the repository name is still
+`dsh-minimax-quota`** — installing, cloning and the community catalog entry all name the repository,
+so the package rename leaves them alone:
+
+```bash
+dsh plugin --profile <your profile> add github:woaiCarlos/dsh-minimax-quota
+```
+
+Or clone and install from the local directory:
+
+```bash
+git clone https://github.com/woaiCarlos/dsh-minimax-quota.git
+dsh plugin --profile <your profile> add file:./dsh-minimax-quota
+```
+
+The plugin then appears under **Plugins → Installed** as “MiniMax Quota”. Flip it on and it works; a Harness restart keeps it.
+
+> You still need a MiniMax route in your profile. Add a MiniMax provider with your API key under **Settings → Models** first — the plugin reads the quota of that route.
+
+## Showing up in a plugin market
+
+The plugin is already listed in the local plugin market's **Discover** tab (its index entry pins a GitHub source to an exact commit, so one click installs it).
+
+![Plugin market entry](docs/market-entry.png)
+
+To appear in the **community market** (the awesome-dsh-plugin catalog the third-party market discovers from), open a PR against
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) that adds a single file:
+
+```yaml
+# data/plugins/woaiCarlos__dsh-minimax-quota.yml
+url: https://github.com/woaiCarlos/dsh-minimax-quota
+name: woaiCarlos/dsh-minimax-quota
+category: usage
+description:
+  en: 'Shows the remaining MiniMax coding-plan quota below the DeepSeek Harness chat composer, and keeps the profile''s MiniMax model list current by appending newly released models.'
+  zh: '在对话输入框下方显示 MiniMax 编程套餐剩余额度，并把新发布的模型追加到配置的模型列表里。'
+icon: https://raw.githubusercontent.com/woaiCarlos/dsh-minimax-quota/main/assets/icon-180.png
+```
+
+A ready-made copy lives in [`catalog/awesome-dsh-plugin.yml`](catalog/awesome-dsh-plugin.yml). The repository already carries the `dsh-plugin` topic.
+
+That catalog's CI checks that the repository is **at least one day old**. This repository was created at 2026-11-10 09:04 UTC, so the PR can go in from 2026-11-11 09:04 UTC onward.
+
+## Releasing
+
+The plugin's **distribution channel is this Git repository**, not npm. Commit and push:
+
+```bash
+git commit -am "..." && git push
+```
+
+The market index entry pins a version to a commit SHA, so after each release update the
+`commit` field in `plugin-market/git-plugins.json` and regenerate the index:
+
+```sh
+cd plugin-market
+DSH_MARKET_ON_DEMAND="$PWD/on-demand.json" node generate-index.mjs
+```
+
+### If you ever also want to publish to npm
+
+The repository already carries npm's official **trusted publishing (OIDC)** workflow
+(`.github/workflows/publish.yml`), which keeps no long-lived npm token in CI.
+
+One-time setup (the package settings page on npmjs.com):
+
+The package name a release would go out under is `@woaicarlos/dsh-minimax`.
+
+| Field | Value |
+| --- | --- |
+| Select your publisher | GitHub Actions |
+| Organization or user | `woaiCarlos` |
+| Repository | `dsh-minimax-quota` |
+| Workflow filename | `publish.yml` |
+
+The workflow is **manual only** (`workflow_dispatch`) for now, because the package does not
+exist on npm yet and an automatic trigger would fail on every release tag. After the first
+successful publish you can switch it to a tag trigger:
+
+```yaml
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+```
+
+The very first publish (the package does not exist on npm yet, so a trusted publisher cannot
+be configured) uses a one-time code from your authenticator:
+
+```bash
+npm publish --otp=<6-digit code from your authenticator app>
+```
+
+## Does my API key leak?
+
+**No.** Specifically:
+
+1. **The repository contains no secret.** The only thing in the source is the *credential reference* `MINIMAX_CN_API_KEY` — the name of the key to look up, not the key itself. The whole directory was secret-scanned before publishing; there is not a single real `sk-…` value in it.
+
+2. **The key stays in the Host process.** The Host half reads it with `ctx.credentials.resolve('MINIMAX_CN_API_KEY')` and uses the value only to build the `Authorization: Bearer …` header for the MiniMax request. It never appears in the JSON the route returns.
+
+3. **The browser never receives it.** The browser only calls the same-origin route `/plugin/minimax/status`, which returns percentages and reset timestamps:
+
+   ```json
+   {
+     "ok": true,
+     "intervalRemainingPercent": 95,
+     "weeklyRemainingPercent": 37,
+     "intervalResetAt": 1794316261854,
+     "weeklyResetAt": 1794407213154,
+     "intervalStatus": 1,
+     "weeklyStatus": 1,
+     "fetchedAt": 1794300583689
+   }
+   ```
+
+### Will it pick up my key automatically after install?
+
+**Yes, as long as your MiniMax key is configured the standard way** — because Harness addresses its credential store by environment-variable name:
+
+| How you configured the key | Does the plugin find it? |
+| --- | --- |
+| Typed into **Settings → Models** for MiniMax | ✅ yes, **no extra step** |
+| `export MINIMAX_CN_API_KEY=sk-…` before launching | ✅ yes |
+| Written in the project `.env` or `~/.dsh/.env` | ✅ yes |
+| Stored under some other environment variable name | ❌ configure it explicitly, see below |
+
+The reason is that the Harness **Models page** derives the reference name from the provider route id when you type a key for it:
+
+```
+minimax-cn  →  MINIMAX_CN_API_KEY
+```
+
+which is exactly the name this plugin looks up. So **if MiniMax is already configured in your Models settings, the plugin works the moment you install it** — it never guesses at other key names.
+
+Lookup order (the credential store's fixed precedence; the first place with a value wins):
+
+```
+1. the stored credential file   ~/.dsh/.credentials.yaml   ← what the Models page writes
+2. the launching environment    MINIMAX_CN_API_KEY=… dsh
+3. the project .env             <cwd>/.env
+4. the home .env                $DSH_HOME/.env
+```
+
+### Using a different reference name
+
+If your key lives under another environment variable name, change the plugin config in `cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: minimax
+      name: '@woaicarlos/dsh-minimax'
+      config:
+        credentialRef: MY_MINIMAX_KEY
+```
+
+## Configuration
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `credentialRef` | `MINIMAX_CN_API_KEY` | The credential reference to read. A reference name in the credential store: letters, digits and underscores, not starting with a digit. |
+
+## How it works
+
+```
+index.js    Host half: resolve credential → call MiniMax → serve the quota on the same-origin route /plugin/minimax/status
+client.js   Browser half: register a pill below the composer, click opens the details panel
+locale/     Chinese and English strings
+```
+
+### Automatic model sync
+
+The plugin probes the models MiniMax has just released and appends them to the `providers.minimax-cn.models` list in the pi-ai configuration.
+Every new model is measured: whether it still answers, what its maximum output per call is, and whether it supports thinking.
+**The entries you already have are never removed and never reordered** — the plugin only appends; their values are not rewritten either, unless your profile override carries no MiniMax model list of its own (see below). A model you deleted by hand is not added back either.
+
+A few things are worth knowing about the write: the **route-level defaults the pi-ai schema resolves** (`defaultContextWindow`, `defaultMaxTokens` and the like) land in that route in the profile patch along with the new list, and the write puts the **whole effective `providers` map** into the patch, so **every other provider route you have** — including one configured only in an inherited layer — lands in the patch too, carrying its own schema-resolved defaults, while a profile override that carries no MiniMax model list of its own means the entries written back are the effective projection's, already carrying a materialised `compat` block.
+
+**The model entries you wrote are written back as they are** — but only when your profile override carries a MiniMax model list of its own.
+
+### When the sync runs
+
+| When | What happens |
+| --- | --- |
+| After the plugin starts | One sync once the profile has loaded (up to five attempts) |
+| Every 24 hours | One sweep of MiniMax's model list; a newly released model is appended |
+| The "Sync now" button in the panel | One sync right away; the panel says whether it worked |
+
+A quiet day costs **one model-list request**: the models the plugin added before, and the models MiniMax has retired, are remembered in the plugin's own state file and are never probed again. A retired model is probed once, and that decision is remembered, so it does not cost two requests every day.
+
+### The state file
+
+The plugin's bookkeeping lives in one file inside the profile directory, not in your profile patch:
+
+```
+<profileDir>/dsh-minimax-state.json
+{ "addedModels": ["MiniMax-M3.1-Flash"], "retiredModels": ["MiniMax-M2"], "lastSyncAt": 1760000000000 }
+```
+
+`addedModels` holds the models the plugin appended — which is why **a model you deleted by hand does not come back**; `retiredModels` holds the models MiniMax has retired. **Deleting this file throws those records away**: a model you removed by hand will reappear on the next sync, and a retired model will be probed once more.
+
+The `dsh-minimax` in the file name is the **old package name**, left as it is on purpose. This file is
+your own data: renaming it would make the plugin lose track of which models it added, and a model you
+deleted by hand would quietly come back. Renaming the package does not rename this file, and upgrading
+to the new version does not ask you to rename it either.
+
+### Where the data comes from
+
+MiniMax does not document this endpoint; it was recovered from their console's front-end bundle (undocumented, so it may change):
+
+```
+GET https://api.minimaxi.com/v1/coding_plan/remains
+Authorization: Bearer <your key>
+```
+
+Key fields:
+
+| Field | Meaning |
+| --- | --- |
+| `model_remains[].current_interval_remaining_percent` | 5-hour window remaining percentage (already the *remaining* value — do not subtract from 100) |
+| `model_remains[].current_weekly_remaining_percent` | Weekly window remaining percentage |
+| `model_remains[].end_time` / `weekly_end_time` | Reset times of the two windows (epoch milliseconds) |
+| `model_remains[].current_weekly_status` | 1 = normal, 2 = weekly quota exhausted, **3 = no weekly limit on this plan** (the weekly tier is hidden then) |
+| `base_resp.status_code` | 0 = success. **This endpoint answers HTTP 200 even when auth fails**, so this body field is the only reliable signal |
+
+The code tries three equivalent paths in turn (`coding_plan/remains`, `api/openplatform/coding_plan/remains`, `token_plan/remains`) as a fallback, since the routing is strict and may change.
+
+### Implementation notes
+
+- **The Host half declares `inject: ['webServer', 'credentials', 'settings', 'profileContext']`.** This is required: the `webServer` service comes from the web app bundle and may load *after* this plugin. Without the declaration the plugin runs too early, silently skips registering the route, and the UI shows “cannot connect”. `profileContext` is declared for the same reason: the plugin's bookkeeping lives in the profile directory, and without that service the plugin forgets which models it added — so a model you deleted by hand would quietly come back.
+- **The reading refreshes every 60 seconds**, and again when you hover or click the pill.
+- **The pill only appears for MiniMax models.** An account with no plan quota (pay-as-you-go) hides the entry entirely rather than showing an empty reading.
+- The quota half is display-only: it writes no session events, never changes the selected model, and takes no part in the prompt. The model sync only appends entries to the end of the profile's MiniMax model list.
+- **Every sync leaves one line on the Host log**, saying how many models it added; a failed sync is logged too (the reason goes to the Host log, the browser only gets a fixed notice).
+
+## Known limitations
+
+- MiniMax **China** only (`api.minimaxi.com`). The international host `api.minimax.io` is a separate account system and the key does not cross over.
+- The endpoint is undocumented; if MiniMax moves it, update `QUOTA_ENDPOINTS` in `index.js`.
+- Pay-as-you-go (BYOK) accounts have no plan quota, so the plugin hides itself.
+
+## License
+
+MIT
+````
+
+### Step: Run the checks
+
+```bash
+npm test
+```
+
+Expected: PASS on Node 22, 24 and 26 — the CI matrix runs all three.
+
+The plan's blocks have to be byte-identical to the committed files afterwards:
+
+```bash
+node -e "
+  const { readFileSync } = require('fs');
+  const plan = readFileSync('docs/superpowers/plans/2026-11-12-dsh-minimax.md', 'utf8');
+  for (const f of ['index.js', 'client.js', 'cordis.patch.yml', 'test/sync.test.js', 'test/client.test.js', 'package.json', 'package-lock.json', 'dsh-plugin.json', 'README.md', 'README.en.md']) {
+    const content = readFileSync(f, 'utf8');
+    const hits = plan.split(content).length - 1;
+    console.log(hits === 1 ? 'OK  ' : 'FAIL', f, hits);
+  }
+"
+```
+
+### Step: Commit
+
+```bash
+git add package.json package-lock.json client.js index.js cordis.patch.yml dsh-plugin.json README.md README.en.md .github/workflows/ci.yml test/client.test.js test/sync.test.js docs/superpowers/plans/2026-11-12-dsh-minimax.md
+git commit -m "refactor: rename the package to @woaicarlos/dsh-minimax
+
+The unscoped npm name belongs to another author, so the package takes a
+scope of its own. The repository keeps its name, which leaves the
+community catalog entry and its pull request valid."
+```
+
+---
+
 ## Self-Review
 
 **Spec coverage**
@@ -7011,7 +7780,7 @@ git commit -m "chore(market): point dsh-minimax at the renamed bundle"
 | §7 提醒机制 | Task 8 |
 | §8 配置与数据流 | Task 7, Task 6 |
 | §9 测试策略 | Tasks 1–7, Task 8 (the Browser half) |
-| §10 兼容性 | Task 9 (URL unchanged) |
+| §10 兼容性 | Task 9 (URL unchanged), Task 11 (the scoped package name; the URL still unchanged) |
 | §11 实施顺序 | Task order matches |
 | §12 未决问题 | Task 2 (`video` filtered by `SUPPORTED_MODALITIES`), Task 4 (probed cap wins) |
 
