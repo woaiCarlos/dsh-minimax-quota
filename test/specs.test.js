@@ -43,3 +43,50 @@ test('an unknown model falls back to a conservative specification', () => {
   assert.deepEqual(spec.modalities, ['text'])
   assert.equal(spec.reasoningOptions, null)
 })
+
+test('the recorded output caps are the ones MiniMax reports', () => {
+  assert.equal(MODEL_SPECS['MiniMax-M3'].outputLimit, 524288)
+  assert.equal(MODEL_SPECS['MiniMax-M3.1-Flash'].outputLimit, 524288)
+  assert.equal(MODEL_SPECS['MiniMax-M2.7'].outputLimit, 131072)
+  assert.equal(FALLBACK_SPEC.outputLimit, 131072)
+})
+
+test('the recorded context windows are the ones MiniMax enforces', () => {
+  assert.equal(MODEL_SPECS['MiniMax-M3'].contextWindow, 1000000)
+  assert.equal(MODEL_SPECS['MiniMax-M3.1-Flash'].contextWindow, 1000000)
+  assert.equal(MODEL_SPECS['MiniMax-M2.7'].contextWindow, 204800)
+  assert.equal(MODEL_SPECS['MiniMax-M2.5-highspeed'].contextWindow, 204800)
+  assert.equal(FALLBACK_SPEC.contextWindow, 1000000)
+})
+
+test('every entry declares a known reasoning shape', () => {
+  for (const [id, spec] of Object.entries(MODEL_SPECS)) {
+    const options = spec.reasoningOptions
+    if (options === null) continue
+    assert.ok(['effort', 'toggle'].includes(options.type), `${id} reasoning type`)
+    if (options.type === 'effort') {
+      assert.ok(Array.isArray(options.values) && options.values.length > 0, `${id} effort values`)
+    } else {
+      assert.equal(options.values, undefined, `${id} toggle carries no values`)
+    }
+  }
+})
+
+test('the effort levels are the five spellings pi-ai accepts', () => {
+  assert.deepEqual(
+    MODEL_SPECS['MiniMax-M3.1-Flash'].reasoningOptions.values,
+    ['low', 'medium', 'high', 'xhigh', 'max'],
+  )
+})
+
+test('a name inherited from the prototype chain does not resolve to a prototype', () => {
+  assert.equal(lookupSpec('toString'), FALLBACK_SPEC)
+  assert.equal(lookupSpec('__proto__'), FALLBACK_SPEC)
+  assert.equal(lookupSpec('constructor'), FALLBACK_SPEC)
+})
+
+test('the snapshot is frozen all the way down', () => {
+  assert.throws(() => MODEL_SPECS['MiniMax-M3'].modalities.push('video'), TypeError)
+  assert.throws(() => { MODEL_SPECS['MiniMax-M3'].contextWindow = 1 }, TypeError)
+  assert.throws(() => FALLBACK_SPEC.modalities.push('video'), TypeError)
+})
