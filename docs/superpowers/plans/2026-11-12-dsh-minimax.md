@@ -17,7 +17,7 @@
 - The browser half's module id **must** equal the package name (`dsh-minimax`). The Loader resolves the client half by package name.
 - Every model entry the plugin writes **must** pass pi-ai's `modelProfile` schema: `id` (string), `name` (string), `contextWindow` (positive integer), `maxTokens` (positive integer), `input` (array of `text`/`image` only), `reasoningEfforts` (`false` or a level map whose values are valid wire spellings), `compat` (optional object).
 - `compat` must be **omitted entirely** when unused — js-yaml cannot serialize an `undefined` value, and `configEditor.edit` would throw.
-- The plugin never modifies, overwrites or removes an entry that is already in the user's list, and never re-adds a model the user deleted by hand.
+- The plugin never removes, reorders or changes the value of an entry that is already in the user's list, and never re-adds a model the user deleted by hand. The entries the user wrote are taken from the **raw profile override**, not from the schema-resolved projection, so a materialised default never changes their wording; the route's schema defaults are materialised into the patch by the write, and the README says so.
 - The plugin never writes an API key into the profile patch. The profile patch only ever gains model ids and metadata.
 - All model ids, specs and probe results quoted in this plan were measured against the live MiniMax API on 2026-11-12 and are reproduced in `lib/specs.js` and `test/` fixtures.
 
@@ -33,10 +33,10 @@
 | `lib/probe.js` | Talk to the Anthropic-compatible MiniMax endpoint: list model ids, read the output cap out of a refusal, detect thinking. |
 | `lib/model-entry.js` | Turn a probe result plus a spec into one pi-ai model entry. |
 | `lib/merge.js` | Decide which entries to append. Pure; never removes. |
-| `lib/state.js` | Persist the set of model ids the plugin has added, so a hand-deleted model is not re-added. |
+| `lib/state.js` | Persist the set of model ids the plugin has added, so a hand-deleted model is not re-added, and the ids MiniMax has retired, so a retired model is probed once and then left alone. |
 | `index.js` | Host half: routes, the sync orchestration, the config schema. |
 | `client.js` | Browser half: quota pill, details panel, models section, notice marker. |
-| `test/*.test.js` | One test file per `lib/` module, run by `node --test`. |
+| `test/*.test.js` | One test file per `lib/` module, plus `test/sync.test.js` for the Host wiring and `test/client.test.js` for the Browser half, run by `node --test`. |
 
 **Splitting `index.js`:** the current file mixes quota parsing with route wiring. The quota parsing moves to `lib/quota.js` and every new responsibility gets its own module, so each is testable without a Host context. `index.js` keeps only what needs a live context.
 
@@ -1667,7 +1667,8 @@ Without this, a model the user deletes by hand comes back on the next sync. The 
 - Consumes: nothing.
 - Produces:
   - `lib/state.js` → `STATE_FILENAME: string`, `emptyState(): object`, `readState(dir): Promise<object>`, `writeState(dir, state): Promise<object>`
-  - A state object is `{ addedModels: string[], lastSyncAt: number | null }`
+  - A state object is `{ addedModels: string[], retiredModels: string[], lastSyncAt: number | null }`
+  - `addedModels` holds the ids the plugin appended, `retiredModels` the ids MiniMax has retired
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1797,6 +1798,35 @@ test('two concurrent writes both succeed and never blend their ids', async () =>
     assert.deepEqual(await readdir(dir), [STATE_FILENAME])
   }
 })
+
+test('writeState stores the retired models', async () => {
+  const dir = await scratchDir()
+  await writeState(dir, { addedModels: [], retiredModels: ['MiniMax-M2'], lastSyncAt: 1760000000000 })
+  const state = await readState(dir)
+  assert.deepEqual(state.retiredModels, ['MiniMax-M2'])
+  assert.equal(state.lastSyncAt, 1760000000000)
+})
+
+test('writeState sorts and de-duplicates the retired models', async () => {
+  const dir = await scratchDir()
+  await writeState(dir, { addedModels: [], retiredModels: ['b', 'a', 'b'], lastSyncAt: null })
+  const state = await readState(dir)
+  assert.deepEqual(state.retiredModels, ['a', 'b'])
+})
+
+test('readState fills in the retired models an older version did not write', async () => {
+  const dir = await scratchDir()
+  await writeFile(join(dir, STATE_FILENAME), JSON.stringify({ addedModels: ['MiniMax-M3'] }), 'utf8')
+  const state = await readState(dir)
+  assert.deepEqual(state.retiredModels, [])
+})
+
+test('readState drops retired entries that are not strings', async () => {
+  const dir = await scratchDir()
+  await writeFile(join(dir, STATE_FILENAME), JSON.stringify({ retiredModels: ['a', 7, null, ''] }), 'utf8')
+  const state = await readState(dir)
+  assert.deepEqual(state.retiredModels, ['a'])
+})
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1811,9 +1841,12 @@ Expected: FAIL with `Cannot find module '../lib/state.js'`
  * The plugin's own bookkeeping.
  *
  * The ids the plugin added are remembered so that a model the user removes
- * by hand is not added back on the next sync. The state lives in one file
- * inside the profile directory, so the plugin's bookkeeping never lands in
- * the user's profile patch.
+ * by hand is not added back on the next sync. The ids MiniMax has retired
+ * are remembered too, so that a model it no longer serves is probed once and
+ * then left alone: `/v1/models` keeps listing a retired model, so without
+ * this memory every sweep would pay two upstream requests for it again. The
+ * state lives in one file inside the profile directory, so the plugin's
+ * bookkeeping never lands in the user's profile patch.
  */
 
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
@@ -1829,7 +1862,19 @@ export const STATE_FILENAME = 'dsh-minimax-state.json'
  * @returns an empty state.
  */
 export function emptyState() {
-  return { addedModels: [], lastSyncAt: null }
+  return { addedModels: [], retiredModels: [], lastSyncAt: null }
+}
+
+/**
+ * Keep the ids of one list that are usable strings.
+ *
+ * @param value - the list as it was stored.
+ * @returns the usable ids.
+ */
+function usableIds(value) {
+  return Array.isArray(value)
+    ? value.filter((id) => typeof id === 'string' && id.length > 0)
+    : []
 }
 
 /**
@@ -1842,11 +1887,9 @@ export async function readState(dir) {
   try {
     const raw = await readFile(join(dir, STATE_FILENAME), 'utf8')
     const parsed = JSON.parse(raw)
-    const addedModels = Array.isArray(parsed?.addedModels)
-      ? parsed.addedModels.filter((id) => typeof id === 'string' && id.length > 0)
-      : []
     return {
-      addedModels,
+      addedModels: usableIds(parsed?.addedModels),
+      retiredModels: usableIds(parsed?.retiredModels),
       lastSyncAt: Number.isFinite(parsed?.lastSyncAt) ? parsed.lastSyncAt : null,
     }
   } catch {
@@ -1871,7 +1914,8 @@ export async function readState(dir) {
 export async function writeState(dir, state) {
   await mkdir(dir, { recursive: true })
   const payload = {
-    addedModels: [...new Set((state.addedModels ?? []).filter((id) => typeof id === 'string' && id.length > 0))].sort(),
+    addedModels: [...new Set(usableIds(state.addedModels))].sort(),
+    retiredModels: [...new Set(usableIds(state.retiredModels))].sort(),
     lastSyncAt: Number.isFinite(state.lastSyncAt) ? state.lastSyncAt : null,
   }
   const target = join(dir, STATE_FILENAME)
@@ -1896,7 +1940,7 @@ export async function writeState(dir, state) {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `node --test test/state.test.js`
-Expected: PASS — 13 tests.
+Expected: PASS — 17 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1930,7 +1974,21 @@ Now the modules meet a live context. This task registers the routes, runs the sy
 - Produces:
   - `index.js` → `runSync(ctx, options): Promise<object>` — exported for the tests
   - `index.js` → `buildStatusPayload(ctx, options): Promise<object>` — exported for the tests
+  - `index.js` → `inject: string[]` — `['webServer', 'credentials', 'settings', 'profileContext']`
+  - `index.js` → `Config` — a Standard Schema with a `toJSON`, so the settings service can render the row
   - Routes: `GET /plugin/minimax/status`, `POST /plugin/minimax/sync`
+
+**Two shapes the Host service reads, and the fakes have to honour them:**
+
+- `settings.write(ns, change, expected, paths)` hands the change the **current projection**, the
+  **inherited projection** and the schema, and it reads every entry of `paths` as a **list of field
+  segments**: `[['providers', 'minimax-cn', 'models']]`. A flat list fails in the service with
+  `TypeError: path.join is not a function`, so the fake refuses that shape too.
+- `settings.describe()` answers with the **schema-resolved** projection: every route and every model
+  entry carries the defaults the pi-ai schema materialises (`compat` on an entry, `defaultContextWindow`
+  and friends on a route). The override it answers with is the raw profile row, which carries the
+  entries exactly as the user wrote them. A fake that answers with the raw map alone hides the
+  difference between the two, and with it the bug the raw-entries rule exists to prevent.
 
 - [ ] **Step 1: Write the failing test for the sync**
 
@@ -1939,7 +1997,55 @@ Create `test/sync.test.js`:
 ```js
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { apply, buildStatusPayload, runSync } from '../index.js'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Config, apply, buildStatusPayload, inject, runSync } from '../index.js'
+import { STATE_FILENAME } from '../lib/state.js'
+
+/**
+ * The defaults the pi-ai schema materialises into a provider route.
+ *
+ * The real service answers with the schema-resolved map, so a route that
+ * the user configured without them carries them anyway.
+ */
+const ROUTE_DEFAULTS = {
+  defaultContextWindow: 1000000,
+  defaultMaxTokens: 128000,
+  defaultInput: ['text'],
+}
+
+/** The default the pi-ai schema materialises into every model entry. */
+const MODEL_DEFAULTS = { compat: {} }
+
+/**
+ * Resolve one provider route the way the pi-ai schema does.
+ *
+ * @param route - the route as it was written.
+ * @returns the resolved route.
+ */
+function resolveRoute(route) {
+  if (route === null || typeof route !== 'object') return route
+  const resolved = { ...route, ...ROUTE_DEFAULTS }
+  if (Array.isArray(route.models)) {
+    resolved.models = route.models.map((entry) => (
+      entry !== null && typeof entry === 'object' ? { ...entry, ...MODEL_DEFAULTS } : entry
+    ))
+  }
+  return resolved
+}
+
+/**
+ * Resolve a provider map the way the pi-ai schema does.
+ *
+ * @param providers - the map as it was written.
+ * @returns the resolved map.
+ */
+function resolveProviders(providers) {
+  const resolved = {}
+  for (const [id, route] of Object.entries(providers ?? {})) resolved[id] = resolveRoute(route)
+  return resolved
+}
 
 /**
  * A stand-in for the Host settings service.
@@ -1947,28 +2053,83 @@ import { apply, buildStatusPayload, runSync } from '../index.js'
  * The service holds two layers: the profile override, which a write replaces,
  * and the inherited layer, which holds the provider map when the user
  * configured it there instead of in the profile. The write is handed the
- * override's projection and its result is merged over the override with the
- * volatile fields stripped, so the `providers` map a write carries replaces
- * the inherited one outright.
+ * current projection, the inherited projection and the schema, and its result
+ * replaces the whole `providers` map, so a route that only an inherited layer
+ * configures is lost when the written map does not carry it.
  *
- * @param options - `{ providers, override }`; `override` defaults to the
- *   effective provider map, and `{}` models an override that holds none.
+ * The effective projection the service answers with is the schema-resolved
+ * one: every route and every model entry carries the defaults the pi-ai
+ * schema materialises. The fake resolves its map the same way, so a test sees
+ * what the service really answers — a materialised default on an entry the
+ * user wrote. The override the service answers with is the raw profile row,
+ * which carries the entries exactly as the user wrote them.
+ *
+ * @param options - `{ providers, override }`; `providers` is the inherited
+ *   layer's map, and `override` is the raw profile row, which defaults to a
+ *   row holding the same map.
  * @returns the settings fake.
  */
 function fakeSettings({ providers = {}, override } = {}) {
   const writes = []
-  const current = override ?? { providers }
+  const state = {
+    revision: 3,
+    inherited: providers,
+    override: override ?? { providers },
+  }
+
+  /**
+   * The provider map the effective projection holds.
+   *
+   * The loader merges the layers shallowly, so an override that carries a
+   * provider map replaces the inherited one.
+   *
+   * @returns the effective map.
+   */
+  const effectiveProviders = () => {
+    const own = state.override?.providers
+    const base = state.inherited ?? {}
+    if (own !== null && typeof own === 'object') return { ...base, ...own }
+    return base
+  }
+
   return {
     writes,
     describe() {
       return [{
         ns: 'llm-pi-ai',
-        revision: 3,
-        value: { providers },
+        // The revision moves when the profile changes, so a write that
+        // carries a stale one cannot pass unnoticed.
+        revision: state.revision,
+        value: { providers: resolveProviders(effectiveProviders()) },
+        // The override is the raw profile row: the entries carry the wording
+        // the user wrote, with no default materialised into them.
+        user: state.override?.providers === undefined
+          ? {}
+          : { providers: state.override.providers },
       }]
     },
     async write(ns, change, expected, paths) {
-      writes.push({ ns, expected, paths, next: change(current) })
+      // The Host service reads every entry of `paths` as a list of field
+      // segments and joins them with a dot, so a write that hands it a flat
+      // list of segments fails there with `path.join is not a function`. The
+      // fake refuses the same shape, so the contract cannot drift unnoticed.
+      for (const path of paths ?? []) {
+        if (!Array.isArray(path)) {
+          throw new TypeError('settings.write expects a list of field paths')
+        }
+      }
+      // The service hands the change the current projection, the inherited
+      // one and the schema.
+      const next = change(
+        { providers: resolveProviders(effectiveProviders()) },
+        { providers: resolveProviders(state.inherited) },
+        { type: 'object' },
+      )
+      writes.push({ ns, expected, paths, next })
+      // The write replaces the volatile map in the override, and the
+      // revision moves with it.
+      state.override = { ...state.override, providers: next.providers }
+      state.revision += 1
     },
   }
 }
@@ -1976,19 +2137,35 @@ function fakeSettings({ providers = {}, override } = {}) {
 /**
  * A Host context with the services the plugin uses.
  *
+ * The logger records every level the Host offers, so a test can reach the
+ * lines the plugin writes. A logger with only `error` would silently skip
+ * every `info` and `warn` line, and no test could see them.
+ *
  * @param options - `{ settings, profileDir, webServer }`.
  * @returns the fake context.
  */
 function ctxWith({ settings, profileDir = '/tmp/dsh-minimax-test', webServer } = {}) {
   const effects = []
+  const effectLabels = []
   const logs = []
+  const infos = []
+  const warns = []
   return {
     settings,
     effects,
+    effectLabels,
     logs,
+    infos,
+    warns,
     logger: {
       error(...args) {
         logs.push(args)
+      },
+      info(...args) {
+        infos.push(args)
+      },
+      warn(...args) {
+        warns.push(args)
       },
     },
     get(name) {
@@ -1998,9 +2175,10 @@ function ctxWith({ settings, profileDir = '/tmp/dsh-minimax-test', webServer } =
       if (name === 'webServer') return webServer
       return undefined
     },
-    effect(setup) {
+    effect(setup, label) {
       const dispose = setup()
       effects.push(dispose)
+      effectLabels.push(label)
       return dispose
     },
   }
@@ -2013,6 +2191,22 @@ function ctxWith({ settings, profileDir = '/tmp/dsh-minimax-test', webServer } =
  */
 function disposeAll(ctx) {
   for (const dispose of ctx.effects.splice(0)) dispose()
+  ctx.effectLabels.splice(0)
+}
+
+/**
+ * Cancel one registered effect, by the label it was registered under.
+ *
+ * @param ctx - the fake context.
+ * @param label - the label the effect carries.
+ */
+function disposeEffect(ctx, label) {
+  const index = ctx.effectLabels.indexOf(label)
+  if (index === -1) return
+  const dispose = ctx.effects[index]
+  ctx.effects.splice(index, 1)
+  ctx.effectLabels.splice(index, 1)
+  dispose()
 }
 
 function makeContext(options = {}) {
@@ -2086,6 +2280,72 @@ const fakeFetch = async (url, init) => {
   return PROBE_FETCH(url, init)
 }
 
+/** A day, in milliseconds: the delay the daily sweep waits for. */
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Watch the timers the plugin arms.
+ *
+ * The daily sweep cannot be waited out in a test, so the clock is driven
+ * instead. The mock timers fire the sweep's timer, and the recorded timers
+ * show which delay was armed, how often the loop re-armed itself, and
+ * whether the timer holds the event loop open.
+ *
+ * @returns the recorded timers and a function that restores the original.
+ */
+function watchTimers() {
+  const originalSetTimeout = globalThis.setTimeout
+  const timers = []
+  globalThis.setTimeout = (handler, ms, ...rest) => {
+    const timer = originalSetTimeout(handler, ms, ...rest)
+    timers.push({ ms, timer })
+    return timer
+  }
+  return {
+    timers,
+    restore() {
+      globalThis.setTimeout = originalSetTimeout
+    },
+  }
+}
+
+/**
+ * The timers armed with the daily delay.
+ *
+ * @param watcher - the timer watcher.
+ * @returns the daily timers.
+ */
+function dailyTimers(watcher) {
+  return watcher.timers.filter((entry) => entry.ms === DAY_MS)
+}
+
+/**
+ * Let the pending work run for a few turns of the event loop.
+ *
+ * @param rounds - how many turns to wait.
+ */
+async function flush(rounds = 30) {
+  for (let round = 0; round < rounds; round += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+}
+
+/**
+ * Let the pending work run until the condition holds.
+ *
+ * A timer that comes due starts work that awaits promises and reads files,
+ * so it needs real turns of the event loop before it is finished.
+ *
+ * @param check - returns true once the work is done.
+ */
+async function waitUntil(check) {
+  for (let round = 0; round < 500; round += 1) {
+    if (check()) return
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  assert.fail('the pending work did not finish in time')
+}
+
 test('runSync appends a newly released model and leaves the rest alone', async () => {
   const settings = fakeSettings({
     providers: {
@@ -2106,10 +2366,11 @@ test('runSync appends a newly released model and leaves the rest alone', async (
   assert.equal(settings.writes.length, 1)
   const write = settings.writes[0]
   // The write names the namespace, the revision it read and the one volatile
-  // path it changed, so a write to the wrong place cannot pass unnoticed.
+  // path it changed, so a write to the wrong place cannot pass unnoticed. The
+  // path is a list of field segments, the shape the Host service reads.
   assert.equal(write.ns, 'llm-pi-ai')
   assert.equal(write.expected, 3)
-  assert.deepEqual(write.paths, ['providers', 'minimax-cn', 'models'])
+  assert.deepEqual(write.paths, [['providers', 'minimax-cn', 'models']])
   const written = write.next.providers['minimax-cn'].models
   assert.equal(written.length, 2)
   assert.equal(written[0].id, 'MiniMax-M3')
@@ -2118,7 +2379,47 @@ test('runSync appends a newly released model and leaves the rest alone', async (
   assert.equal(written[1].maxTokens, 524288)
   // The rest of the route survives, and so does every other provider.
   assert.equal(write.next.providers['minimax-cn'].apiKeyEnv, 'MINIMAX_CN_API_KEY')
-  assert.deepEqual(write.next.providers['other-route'], { apiKeyEnv: 'OTHER_API_KEY' })
+  assert.equal(write.next.providers['other-route'].apiKeyEnv, 'OTHER_API_KEY')
+})
+
+test('the written entry keeps the wording the user wrote', async () => {
+  // The effective projection is the schema-resolved one, so the entry the
+  // user wrote carries a materialised `compat` block there. The override is
+  // the raw profile row, so the entry the user wrote is there as it was.
+  const userEntry = { id: 'MiniMax-M3', name: 'MiniMax-M3-1M', maxTokens: 512000 }
+  const settings = fakeSettings({
+    providers: {
+      'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [userEntry] },
+      'other-route': { apiKeyEnv: 'OTHER_API_KEY' },
+    },
+    override: {
+      providers: {
+        'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [userEntry] },
+      },
+    },
+  })
+  // The service really answers with a materialised default on the entry.
+  const descriptor = settings.describe()[0]
+  assert.deepEqual(descriptor.value.providers['minimax-cn'].models[0].compat, {})
+  const ctx = ctxWith({ settings })
+  const result = await runSync(ctx, {
+    credentialRef: 'MINIMAX_CN_API_KEY',
+    profileDir: '/tmp/dsh-minimax-test',
+    fetchImpl: fakeFetch,
+    stateReader: async () => ({ addedModels: [], lastSyncAt: null }),
+    stateWriter: async () => {},
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.added, ['MiniMax-M3.1-Flash'])
+  assert.equal(settings.writes.length, 1)
+  const written = settings.writes[0].next.providers['minimax-cn'].models
+  // The entry the user wrote is written back exactly as it was: no
+  // materialised default, no changed value, no new order.
+  assert.deepEqual(written[0], userEntry)
+  // The new model is appended behind it.
+  assert.equal(written[1].id, 'MiniMax-M3.1-Flash')
+  // The sibling route from the inherited layer survives the write.
+  assert.equal(settings.writes[0].next.providers['other-route'].apiKeyEnv, 'OTHER_API_KEY')
 })
 
 test('runSync keeps a route that only an inherited layer configures', async () => {
@@ -2150,7 +2451,7 @@ test('runSync keeps a route that only an inherited layer configures', async () =
   // Its model list is the one the sync planned.
   assert.deepEqual(written['minimax-cn'].models.map((entry) => entry.id), ['MiniMax-M3', 'MiniMax-M3.1-Flash'])
   // The sibling route is not lost either.
-  assert.deepEqual(written['other-route'], { apiKeyEnv: 'OTHER_API_KEY' })
+  assert.equal(written['other-route'].apiKeyEnv, 'OTHER_API_KEY')
 })
 
 test('runSync still succeeds when the state cannot be written', async () => {
@@ -2495,6 +2796,399 @@ test('the first sync is cancelled when the plugin is disposed', async (t) => {
     t.mock.timers.reset()
   }
 })
+
+test('the daily sweep is registered as an effect of its own', async () => {
+  const webServer = fakeWebServer()
+  const ctx = ctxWith({ settings: fakeSettings(), webServer })
+  try {
+    await apply(ctx, {})
+    // The startup attempt and the daily sweep are two separate effects, so
+    // unloading the plugin cancels both of them.
+    assert.deepEqual(ctx.effectLabels, [
+      'dsh-minimax: routes',
+      'dsh-minimax: first sync',
+      'dsh-minimax: daily sync',
+    ])
+  } finally {
+    disposeAll(ctx)
+  }
+})
+
+test('the daily sweep runs one sync when the day elapses', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-daily-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  let modelLists = 0
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      modelLists += 1
+      return new Response(JSON.stringify({ data: MODEL_IDS.map((id) => ({ id })) }), { status: 200 })
+    }
+    return PROBE_FETCH(url, init)
+  }
+  try {
+    await apply(ctx, {})
+    // The startup attempt is called off, so the only sync that can run is
+    // the daily sweep.
+    disposeEffect(ctx, 'dsh-minimax: first sync')
+
+    // The day has not passed yet, so nothing has run.
+    t.mock.timers.tick(DAY_MS - 1)
+    await flush()
+    assert.equal(modelLists, 0)
+    assert.equal(dailyTimers(watcher).length, 1)
+
+    // The day passes, and the sweep runs exactly one sync.
+    t.mock.timers.tick(1)
+    await waitUntil(() => dailyTimers(watcher).length === 2)
+    assert.equal(modelLists, 1)
+    assert.equal(settings.writes.length, 1)
+
+    // The next day brings exactly one more sync, and no more than that.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 3)
+    assert.equal(modelLists, 2)
+    // Nothing new was found, so the second sweep wrote nothing at all.
+    assert.equal(settings.writes.length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('a second sweep does not probe a model the plugin already added', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-steady-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  let modelLists = 0
+  const probed = []
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      modelLists += 1
+      return new Response(JSON.stringify({ data: [{ id: 'MiniMax-M3.1-Flash' }] }), { status: 200 })
+    }
+    probed.push(JSON.parse(init.body).model)
+    return PROBE_FETCH(url, init)
+  }
+  try {
+    await apply(ctx, {})
+    disposeEffect(ctx, 'dsh-minimax: first sync')
+
+    // The first sweep measures the model MiniMax offers and adds it.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 2)
+    assert.equal(modelLists, 1)
+    // The cap request and the thinking request.
+    assert.deepEqual(probed, ['MiniMax-M3.1-Flash', 'MiniMax-M3.1-Flash'])
+    assert.equal(settings.writes.length, 1)
+    const written = settings.writes[0].next.providers['minimax-cn'].models
+    assert.deepEqual(written.map((entry) => entry.id), ['MiniMax-M3.1-Flash'])
+    // The plugin remembers what it added.
+    const state = JSON.parse(await readFile(join(profileDir, STATE_FILENAME), 'utf8'))
+    assert.deepEqual(state.addedModels, ['MiniMax-M3.1-Flash'])
+
+    // The second sweep costs one model-list request and no probe at all:
+    // the model the plugin added is not a candidate any more.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 3)
+    assert.equal(modelLists, 2)
+    assert.equal(probed.length, 2)
+    assert.equal(settings.writes.length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the daily sweep is cancelled when the plugin is disposed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-cancel-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  let modelLists = 0
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      modelLists += 1
+      return new Response(JSON.stringify({ data: MODEL_IDS.map((id) => ({ id })) }), { status: 200 })
+    }
+    return PROBE_FETCH(url, init)
+  }
+  try {
+    await apply(ctx, {})
+    // The plugin is unloaded before the sweep comes due, so the pending
+    // sweep must not run a sync that writes the profile afterwards.
+    disposeAll(ctx)
+    t.mock.timers.tick(DAY_MS)
+    await flush()
+    assert.equal(modelLists, 0)
+    assert.equal(settings.writes.length, 0)
+    // The cancelled sweep stops: it does not arm another day.
+    assert.equal(dailyTimers(watcher).length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the pending daily timer does not hold the process open', async () => {
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const ctx = ctxWith({ settings: fakeSettings(), webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [] }), { status: 200 })
+  try {
+    await apply(ctx, {})
+    const daily = dailyTimers(watcher)
+    assert.equal(daily.length, 1)
+    // The sweep's timer is unreferenced, so a pending sweep can never keep
+    // a process alive on its own.
+    assert.equal(daily[0].timer.hasRef(), false)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+  }
+})
+
+
+/**
+ * A fetch that answers like MiniMax does for a model it has retired.
+ *
+ * MiniMax validates `max_tokens` before it checks whether the model still
+ * exists, so the cap request answers with a cap and only the next request
+ * says the model is gone. A retired model therefore costs two requests.
+ */
+const RETIRED_FETCH = async (_url, init) => {
+  const body = JSON.parse(init.body)
+  if (body.max_tokens === 999999999) {
+    return new Response(JSON.stringify({ error: { message: 'invalid params, model[MiniMax-M2] does not support max tokens > 131072 (2013)' } }), { status: 400 })
+  }
+  return new Response(JSON.stringify({ error: { message: 'The model "MiniMax-M2" is no longer available. (2069)' } }), { status: 400 })
+}
+
+test('a retired model is probed once and then remembered', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-retired-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  let modelLists = 0
+  let probes = 0
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/v1/models')) {
+      modelLists += 1
+      // MiniMax keeps listing the model it has retired.
+      return new Response(JSON.stringify({ data: [{ id: 'MiniMax-M2' }] }), { status: 200 })
+    }
+    probes += 1
+    return RETIRED_FETCH(url, init)
+  }
+  try {
+    await apply(ctx, {})
+    disposeEffect(ctx, 'dsh-minimax: first sync')
+
+    // The first sweep meets the retired model and probes it.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 2)
+    assert.equal(modelLists, 1)
+    // The cap request and the request that says the model is gone.
+    assert.equal(probes, 2)
+    // A retired model is never written into the profile.
+    assert.equal(settings.writes.length, 0)
+    // The decision is remembered.
+    const state = JSON.parse(await readFile(join(profileDir, STATE_FILENAME), 'utf8'))
+    assert.deepEqual(state.retiredModels, ['MiniMax-M2'])
+
+    // The next sweep costs one model-list request and no probe at all: the
+    // model MiniMax retired is not a candidate any more.
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 3)
+    assert.equal(modelLists, 2)
+    assert.equal(probes, 2)
+    assert.equal(settings.writes.length, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the daily sweep leaves one line on the Host log', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const watcher = watchTimers()
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-daily-log-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fakeFetch
+  try {
+    await apply(ctx, {})
+    disposeEffect(ctx, 'dsh-minimax: first sync')
+    t.mock.timers.tick(DAY_MS)
+    await waitUntil(() => dailyTimers(watcher).length === 2)
+    // The line says how many models were added, so a day that added three
+    // does not read like a day that added none.
+    assert.equal(ctx.infos.length, 1)
+    assert.equal(ctx.infos[0][1], 'dsh-minimax: the daily sync added')
+    assert.equal(ctx.infos[0][2], 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    watcher.restore()
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the startup sync leaves one line on the Host log', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-startup-log-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fakeFetch
+  try {
+    await apply(ctx, {})
+    // The first attempt waits two seconds before it runs.
+    t.mock.timers.tick(2000)
+    await waitUntil(() => ctx.infos.length > 0)
+    assert.equal(ctx.infos[0][1], 'dsh-minimax: the startup sync added')
+    // The line says how many models were added.
+    assert.equal(ctx.infos[0][2], 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the manual sync leaves one line on the Host log', async () => {
+  const webServer = fakeWebServer()
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-manual-log-'))
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fakeFetch
+  try {
+    await apply(ctx, {})
+    const sync = webServer.registered.find((route) => route.path === '/plugin/minimax/sync')
+    const res = fakeResponse()
+    await sync.handler(fakeRequest('POST'), res)
+    assert.equal(ctx.infos.length, 1)
+    assert.equal(ctx.infos[0][1], 'dsh-minimax: the manual sync added')
+    // The line says how many models were added.
+    assert.equal(ctx.infos[0][2], 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+  }
+})
+
+test('a failed startup sync is not swallowed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const webServer = fakeWebServer()
+  const settings = fakeSettings({
+    providers: { 'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY', models: [] } },
+  })
+  settings.write = async () => {
+    throw new Error('settings namespace "llm-pi-ai" changed since it was read')
+  }
+  const profileDir = await mkdtemp(join(tmpdir(), 'dsh-minimax-startup-fail-'))
+  const ctx = ctxWith({ settings, profileDir, webServer })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fakeFetch
+  try {
+    await apply(ctx, {})
+    t.mock.timers.tick(2000)
+    await waitUntil(() => ctx.logs.length > 0)
+    // The failure reaches the Host log instead of disappearing into an
+    // empty catch.
+    assert.equal(ctx.logs[0].some((arg) => arg instanceof Error && arg.message.includes('changed since it was read')), true)
+  } finally {
+    globalThis.fetch = originalFetch
+    disposeAll(ctx)
+    await rm(profileDir, { recursive: true, force: true })
+    t.mock.timers.reset()
+  }
+})
+
+test('the plugin declares the profile context it reads its state from', async () => {
+  // Without the service the fallbacks would swap in a no-op state reader and
+  // writer, and a model the user deleted by hand would come back.
+  assert.deepEqual(inject, ['webServer', 'credentials', 'settings', 'profileContext'])
+})
+
+test('the config refuses a credential reference the credentials service cannot resolve', async () => {
+  // The credentials service only recognises a reference that is a shell
+  // identifier, so anything else resolves to nothing.
+  const refused = Config['~standard'].validate({ credentialRef: 'sk-example-key' })
+  assert.equal(Array.isArray(refused.issues), true)
+  assert.equal(refused.issues.length, 1)
+  assert.equal(refused.issues[0].path[0], 'credentialRef')
+  const accepted = Config['~standard'].validate({ credentialRef: 'MINIMAX_CN_API_KEY' })
+  assert.equal(accepted.value.credentialRef, 'MINIMAX_CN_API_KEY')
+})
+
+test('the config schema describes itself for the settings service', async () => {
+  // Without a description the settings service finds no form for this row,
+  // and the row stays invisible in the Settings UI.
+  assert.equal(typeof Config.toJSON, 'function')
+  const json = Config.toJSON()
+  assert.equal(json.uid, 'dsh-minimax.config')
+  assert.equal(json.refs[json.uid].dict.credentialRef, 'dsh-minimax.credentialRef')
+  // The field is volatile, so it can be edited without remounting the plugin.
+  assert.equal(json.refs['dsh-minimax.credentialRef'].meta.volatile, true)
+  // Every reference the description names has to exist, or the service
+  // cannot rebuild the schema.
+  for (const ref of Object.values(json.refs)) {
+    for (const child of Object.values(ref.dict ?? {})) {
+      assert.ok(json.refs[child] !== undefined)
+    }
+    if (ref.inner !== undefined) assert.ok(json.refs[ref.inner] !== undefined)
+  }
+})
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -2545,6 +3239,22 @@ const SETTINGS_NAMESPACE = 'llm-pi-ai'
 /** The provider route inside that namespace. */
 const PROVIDER_ROUTE = 'minimax-cn'
 
+/**
+ * The grammar a credential reference must match.
+ *
+ * The credentials service only recognises a reference that is a POSIX shell
+ * identifier, so a reference outside this grammar resolves to nothing: the
+ * plugin would answer `missing-credential` while the key itself sits in
+ * plain text in the profile patch.
+ */
+const CREDENTIAL_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/** The field of the provider map that holds the model list. */
+const PROVIDERS_PATH = 'providers'
+
+/** The field of a provider route that holds the model list. */
+const MODELS_PATH = 'models'
+
 /** How long the first sync waits before it tries again. */
 const FIRST_SYNC_DELAY_MS = 2000
 
@@ -2583,12 +3293,50 @@ function providerRoutes(descriptor) {
 }
 
 /**
+ * The provider routes the profile override itself carries.
+ *
+ * The override is the raw profile patch row, so its entries carry exactly
+ * the wording the user wrote: no schema default has been materialised into
+ * them. The effective projection cannot be used for this, because it is the
+ * schema-resolved one — every entry the user wrote carries a materialised
+ * `compat` block, and writing those back would change the user's wording.
+ *
+ * @param descriptor - the pi-ai namespace descriptor.
+ * @returns the override's provider routes, or undefined when the descriptor
+ *   carries no override.
+ */
+function overrideRoutes(descriptor) {
+  const providers = descriptor?.user?.providers
+  return providers !== null && typeof providers === 'object' ? providers : undefined
+}
+
+/**
+ * The model entries the profile override itself carries.
+ *
+ * @param descriptor - the pi-ai namespace descriptor.
+ * @returns the entries, or undefined when the override carries none.
+ */
+function overrideModels(descriptor) {
+  const routes = overrideRoutes(descriptor)
+  if (routes === undefined) return undefined
+  const models = routes[PROVIDER_ROUTE]?.models
+  return Array.isArray(models) ? models : undefined
+}
+
+/**
  * The model entries the profile currently lists.
+ *
+ * The override's own entries come first, so that the entries the user
+ * wrote keep their wording. The effective entries are the fallback, for a
+ * route the override does not carry: a route the user configured in an
+ * inherited layer is only visible there.
  *
  * @param descriptor - the pi-ai namespace descriptor.
  * @returns the listed entries.
  */
 function currentModels(descriptor) {
+  const raw = overrideModels(descriptor)
+  if (raw !== undefined) return raw
   const models = providerRoutes(descriptor)[PROVIDER_ROUTE]?.models
   return Array.isArray(models) ? models : []
 }
@@ -2606,6 +3354,26 @@ function currentModels(descriptor) {
  */
 function reportFailure(ctx, message, error) {
   ctx.logger?.error?.('%s: %s', message, error)
+}
+
+/**
+ * Report one sync on the Host log.
+ *
+ * The design asks for one line per sync, and the line has to say how many
+ * models were added: a sync that added nothing and a sync that added three
+ * read the same otherwise.
+ *
+ * @param ctx - Host context.
+ * @param label - what ran, e.g. 'the startup sync'.
+ * @param result - the sync result.
+ */
+function logSync(ctx, label, result) {
+  if (result?.ok !== true) {
+    ctx.logger?.warn?.('%s: %s', `dsh-minimax: ${label} failed`, result?.reason ?? 'unknown')
+    return
+  }
+  const added = Array.isArray(result.added) ? result.added.length : 0
+  ctx.logger?.info?.('%s: %d', `dsh-minimax: ${label} added`, added)
 }
 
 /** The sync that is running right now, so a second caller waits for it. */
@@ -2662,6 +3430,8 @@ async function runSyncOnce(ctx, options = {}) {
     : (dir, state) => writeState(dir, state))
 
   const state = await readStateFn(profileDir)
+  const addedModels = Array.isArray(state.addedModels) ? state.addedModels : []
+  const retiredModels = Array.isArray(state.retiredModels) ? state.retiredModels : []
   const listed = currentModels(descriptor)
   const ids = await fetchModelIds(apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
   if (ids === null) {
@@ -2670,46 +3440,60 @@ async function runSyncOnce(ctx, options = {}) {
     return { ok: false, reason: 'model-list-failed' }
   }
   const candidateIds = ids
-    .filter((id) => !listed.some((entry) => entry?.id === id) && !state.addedModels.includes(id))
+    .filter((id) => !listed.some((entry) => entry?.id === id)
+      && !addedModels.includes(id)
+      // A model MiniMax has retired stays retired, and it is remembered:
+      // `/v1/models` keeps listing it, so probing it again every sweep would
+      // cost two upstream requests for an answer that never changes.
+      && !retiredModels.includes(id))
 
   const entries = new Map()
+  const retiredIds = []
   for (const id of candidateIds) {
     const probe = await probeModel(id, apiKey, { signal: options.signal, fetchImpl: options.fetchImpl })
+    if (probe.status === 'retired') {
+      retiredIds.push(id)
+      continue
+    }
     if (probe.status !== 'ok') continue
     entries.set(id, buildModelEntry(id, probe))
   }
 
   const plan = planAppend({
     currentModels: listed,
-    addedModels: state.addedModels,
+    addedModels,
     candidateIds,
     entries,
   })
-  if (!plan.changed) {
-    return { ok: true, added: [], models: listed }
+  if (!plan.changed && retiredIds.length === 0) {
+    return { ok: true, added: [], models: plan.models }
   }
 
-  // The written map is the effective one, because the settings service
-  // replaces the whole `providers` map: a route the user configured in an
-  // inherited layer is only visible in the effective projection, and a map
-  // built from the profile override alone would drop that route and the
-  // credential environment it needs.
-  const routes = providerRoutes(descriptor)
-  await settings.write(SETTINGS_NAMESPACE, (current) => ({
-    ...current,
-    providers: {
-      ...routes,
-      [PROVIDER_ROUTE]: {
-        ...routes[PROVIDER_ROUTE],
-        models: plan.models,
+  if (plan.changed) {
+    // The written map is the effective one, because the settings service
+    // replaces the whole `providers` map: a route the user configured in an
+    // inherited layer is only visible in the effective projection, and a map
+    // built from the profile override alone would drop that route and the
+    // credential environment it needs. The route's model list is the planned
+    // one, which the user's own entries start from.
+    const routes = providerRoutes(descriptor)
+    await settings.write(SETTINGS_NAMESPACE, (current) => ({
+      ...current,
+      providers: {
+        ...routes,
+        [PROVIDER_ROUTE]: {
+          ...routes[PROVIDER_ROUTE],
+          models: plan.models,
+        },
       },
-    },
-  }), descriptor.revision, ['providers', PROVIDER_ROUTE, 'models'])
+    }), descriptor.revision, [[PROVIDERS_PATH, PROVIDER_ROUTE, MODELS_PATH]])
+  }
 
   const now = options.now ?? Date.now
   try {
     await writeStateFn(profileDir, {
-      addedModels: [...state.addedModels, ...plan.addedIds],
+      addedModels: [...addedModels, ...plan.addedIds],
+      retiredModels: [...retiredModels, ...retiredIds],
       lastSyncAt: now(),
     })
   } catch {
@@ -2762,7 +3546,7 @@ export async function apply(ctx, config) {
   // so the route is never silently skipped.
   const webServer = ctx.get('webServer')
   if (webServer === undefined) {
-    throw new Error('dsh-minimax-quota: the webServer service is unavailable, so the routes cannot be registered')
+    throw new Error('dsh-minimax: the webServer service is unavailable, so the routes cannot be registered')
   }
 
   const send = (res, payload, status = 200) => {
@@ -2789,7 +3573,7 @@ export async function apply(ctx, config) {
           // leave the browser's request pending forever and stop its polling.
           // The browser only learns that the request failed: the message
           // belongs on the Host side, where the operator can read it.
-          reportFailure(ctx, 'dsh-minimax-quota: the status route failed', error)
+          reportFailure(ctx, 'dsh-minimax: the status route failed', error)
           send(res, {
             quota: { ok: false, reason: 'request-failed' },
             models: { synced: [], added: [], syncedAt: null },
@@ -2810,29 +3594,33 @@ export async function apply(ctx, config) {
           if (!res.writableEnded) abort.abort()
         })
         try {
-          send(res, await runSync(ctx, { credentialRef, signal: abort.signal }))
+          const result = await runSync(ctx, { credentialRef, signal: abort.signal })
+          // Every sync leaves one line on the Host log, so the operator can
+          // see what the plugin did without reading the profile.
+          logSync(ctx, 'the manual sync', result)
+          send(res, result)
         } catch (error) {
           // The browser only ever receives a fixed reason, so a failure nobody
           // anticipated cannot carry an internal message into the page.
-          reportFailure(ctx, 'dsh-minimax-quota: the sync route failed', error)
+          reportFailure(ctx, 'dsh-minimax: the sync route failed', error)
           send(res, { ok: false, reason: 'sync-failed' })
         }
       },
     }),
   ]
-  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax-quota: routes')
+  ctx.effect(() => () => { for (const dispose of disposers) dispose() }, 'dsh-minimax: routes')
 
   // The profile may still be loading, so the first sync waits for the pi-ai
   // namespace to appear before it gives up. The pending attempt is called off
   // with the plugin, so a plugin that is unloaded inside that window never
   // writes the profile afterwards.
   const cancelFirstSync = scheduleSync(ctx, credentialRef)
-  ctx.effect(() => cancelFirstSync, 'dsh-minimax-quota: first sync')
+  ctx.effect(() => cancelFirstSync, 'dsh-minimax: first sync')
 
   // The plugin also probes once a day, so a model MiniMax releases while the
   // plugin is running still arrives without the user restarting anything.
   const cancelDailySync = scheduleDailySync(ctx, credentialRef)
-  ctx.effect(() => cancelDailySync, 'dsh-minimax-quota: daily sync')
+  ctx.effect(() => cancelDailySync, 'dsh-minimax: daily sync')
 }
 
 /**
@@ -2879,10 +3667,12 @@ function scheduleSync(ctx, credentialRef) {
       if (cancelled) return
       try {
         const result = await runSync(ctx, { credentialRef })
+        logSync(ctx, 'the startup sync', result)
         if (result.ok || result.reason === 'missing-credential') return
-      } catch {
+      } catch (error) {
         // A failed sync must never take the plugin down; the next attempt
-        // tries again.
+        // tries again. The failure is not swallowed: it goes to the log.
+        reportFailure(ctx, 'dsh-minimax: the startup sync failed', error)
       }
     }
   }
@@ -2897,8 +3687,10 @@ function scheduleSync(ctx, credentialRef) {
  * The plugin probes the models MiniMax offers at startup, and then once a
  * day, so a model MiniMax releases while the plugin is running still
  * arrives without the user restarting anything. Only models that are
- * neither listed by the user nor added by the plugin are probed, so a quiet
- * day costs one model-list request and nothing else.
+ * neither listed by the user nor added by the plugin nor retired by MiniMax
+ * are probed, so a quiet day costs one model-list request and nothing else.
+ * A model MiniMax retired is probed once and then remembered, so it does not
+ * cost two requests every day for an answer that never changes.
  *
  * @param ctx - Host context.
  * @param credentialRef - credential reference to resolve.
@@ -2938,7 +3730,7 @@ function scheduleDailySync(ctx, credentialRef) {
       if (cancelled) return
       try {
         const result = await runSync(ctx, { credentialRef })
-        ctx.logger?.info?.('%s: %s', 'dsh-minimax-quota: the daily sync found', result.ok ? 'no new model' : result.reason)
+        logSync(ctx, 'the daily sync', result)
       } catch (error) {
         reportFailure(ctx, 'the daily sync failed', error)
       }
@@ -2951,8 +3743,33 @@ function scheduleDailySync(ctx, credentialRef) {
 
 /**
  * Services this plugin waits for before it activates.
+ *
+ * `profileContext` is declared because the plugin's bookkeeping lives in the
+ * profile directory: without the service the fallbacks would swap in a
+ * no-op state reader and writer, the plugin would have no memory of what it
+ * added, and a model the user deleted by hand would silently come back.
  */
-export const inject = ['webServer', 'credentials', 'settings']
+export const inject = ['webServer', 'credentials', 'settings', 'profileContext']
+
+/**
+ * The schema of the credential reference field.
+ *
+ * The field is volatile, so the settings service can edit it without
+ * remounting the plugin. The shape mirrors what a schema library would
+ * produce, because the settings service rebuilds the schema from `toJSON`.
+ */
+const CredentialRefSchema = {
+  type: 'string',
+  meta: { volatile: true },
+  toJSON() {
+    return {
+      uid: 'dsh-minimax.credentialRef',
+      refs: {
+        'dsh-minimax.credentialRef': { type: 'string', meta: { volatile: true } },
+      },
+    }
+  },
+}
 
 /**
  * A Standard Schema for the plugin's configuration.
@@ -2961,25 +3778,41 @@ export const inject = ['webServer', 'credentials', 'settings']
  * entry, so this bundle carries its own tiny implementation rather than a
  * schema dependency: the bundle is installed as a link into a workspace
  * directory, where a declared dependency would not resolve.
+ *
+ * The schema also carries the shape the settings service reads — `type`,
+ * `meta`, `dict` and `toJSON` — because without them the settings service
+ * finds no form for this row, and the row stays invisible in the Settings
+ * UI, where `credentialRef` is edited.
  */
 const Config = {
   '~standard': {
     version: 1,
-    vendor: 'dsh-minimax-quota',
+    vendor: 'dsh-minimax',
     validate(value) {
       const raw = value === undefined || value === null ? {} : value
       if (typeof raw !== 'object' || Array.isArray(raw)) {
-        return { issues: [{ message: 'dsh-minimax-quota: config must be an object' }] }
+        return { issues: [{ message: 'dsh-minimax: config must be an object' }] }
       }
       const issues = []
       const config = {}
       for (const [key, entry] of Object.entries(raw)) {
         if (key !== 'credentialRef') {
-          issues.push({ message: `dsh-minimax-quota: unknown config field "${key}"`, path: [key] })
+          issues.push({ message: `dsh-minimax: unknown config field "${key}"`, path: [key] })
           continue
         }
         if (typeof entry !== 'string' || entry.length === 0) {
-          issues.push({ message: 'dsh-minimax-quota: credentialRef must be a non-empty string', path: [key] })
+          issues.push({ message: 'dsh-minimax: credentialRef must be a non-empty string', path: [key] })
+          continue
+        }
+        if (!CREDENTIAL_REF_PATTERN.test(entry)) {
+          // The credentials service only recognises a reference that is a
+          // shell identifier. A reference outside that grammar resolves to
+          // nothing, so it would read as a missing credential while the key
+          // itself sat in plain text in the profile patch.
+          issues.push({
+            message: `dsh-minimax: credentialRef "${entry}" must be a credential reference name (letters, digits and underscores, not starting with a digit)`,
+            path: [key],
+          })
           continue
         }
         config.credentialRef = entry
@@ -2989,6 +3822,22 @@ const Config = {
       return { value: config }
     },
   },
+  type: 'object',
+  meta: {},
+  dict: { credentialRef: CredentialRefSchema },
+  toJSON() {
+    return {
+      uid: 'dsh-minimax.config',
+      refs: {
+        'dsh-minimax.config': {
+          type: 'object',
+          meta: {},
+          dict: { credentialRef: 'dsh-minimax.credentialRef' },
+        },
+        'dsh-minimax.credentialRef': { type: 'string', meta: { volatile: true } },
+      },
+    }
+  },
 }
 
 export { Config }
@@ -2997,7 +3846,7 @@ export { Config }
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npm test`
-Expected: PASS — the five sync tests plus the earlier suites.
+Expected: PASS — the sync suite plus the earlier suites.
 
 - [ ] **Step 5: Commit**
 
@@ -3018,6 +3867,7 @@ A failed sync never takes the plugin down."
 - Modify: `client.js`
 - Modify: `locale/zh.json`
 - Modify: `locale/en.json`
+- Create: `test/client.test.js`
 
 **Interfaces:**
 - Consumes: `GET /plugin/minimax/status` — `{ quota, models: { synced, added, syncedAt } }`.
@@ -3040,8 +3890,18 @@ const STATUS_ROUTE = '/plugin/minimax/status'
 Replace every fetch of the old route with a fetch of `STATUS_ROUTE`, and replace the response handling so that the quota view is read from the `quota` key of the payload:
 
 ```js
-const payload = await response.json()
-return payload?.quota ?? { ok: false, reason: 'request-failed', message: 'Malformed response.' }
+    /**
+     * The quota view of a status payload.
+     *
+     * A payload without a quota is malformed, so it reads as the failure the
+     * browser already knows how to show.
+     *
+     * @param payload - the status payload.
+     * @returns the quota view.
+     */
+    function quotaView(payload) {
+      return payload?.quota ?? { ok: false, reason: 'request-failed', message: 'Malformed response.' }
+    }
 ```
 
 The panel must render the quota exactly as before — the payload nesting is the only change.
@@ -3051,25 +3911,47 @@ The panel must render the quota exactly as before — the payload nesting is the
 In `client.js`, add a component right after `QuotaPanel`:
 
 ```js
-function ModelsPanel({ models, t }) {
-  if (models === undefined) return null
-  const synced = Array.isArray(models.synced) ? models.synced : []
-  const added = Array.isArray(models.added) ? models.added : []
-  if (synced.length === 0) return null
-  return h('div', { className: '__mmq_models' },
-    h('div', { className: '__mmq_sectionTitle' }, t('modelsTitle')),
-    h('div', { className: '__mmq_modelList' },
-      synced.map((id) => h('span', { className: '__mmq_modelChip', key: id }, id)),
-    ),
-    added.length > 0
-      ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
-      : null,
-    models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
-  )
-}
+    /**
+     * The models section: the ids the profile currently holds, how many of
+     * them the plugin added, the moment the list was last written, and the
+     * button that asks the Host for a fresh sync.
+     *
+     * The section never edits the list itself: the plugin appends and never
+     * edits, so the models it added are the user's to keep or to remove by
+     * hand. The button only asks; the sync itself runs on the Host.
+     *
+     * The section shows even when no model has been synced yet, so the sync
+     * button is reachable in exactly the state where it is most useful.
+     */
+    function ModelsPanel({ models, t, onSync, syncing, syncError }) {
+      if (models === undefined) return null
+      const synced = Array.isArray(models.synced) ? models.synced : []
+      const added = Array.isArray(models.added) ? models.added : []
+      return h('div', { className: '__mmq_models' },
+        h('div', { className: '__mmq_sectionTitle' }, t('modelsTitle')),
+        synced.length > 0
+          ? h('div', { className: '__mmq_modelList' },
+              synced.map((id) => h('span', { className: '__mmq_modelChip', key: id }, id)),
+            )
+          : null,
+        added.length > 0
+          ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
+          : null,
+        models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
+        syncError ? h('div', { className: '__mmq_error' }, syncError) : null,
+        onSync
+          ? h('button', {
+              className: '__mmq_syncButton',
+              type: 'button',
+              disabled: syncing === true,
+              onClick: onSync,
+            }, syncing === true ? t('modelsSyncing') : t('modelsSync'))
+          : null,
+      )
+    }
 ```
 
-Render it inside `QuotaPanel`, after the weekly section and before the fetched-at line, with the models passed down. `QuotaPanel` receives `view` today; add a `models` prop and pass it from `MiniMaxQuotaPill`, which already owns the fetched payload.
+Render it inside `QuotaPanel`, after the weekly section and before the fetched-at line, with the models passed down. `QuotaPanel` receives `view` today; add a `models` prop and pass it from `MiniMaxQuotaPill`, which already owns the fetched payload. The section renders whenever the status route answered — a profile with a MiniMax route but no MiniMax models yet must still be able to ask for a sync, so the chip list is the only part that is guarded.
 
 - [ ] **Step 4: Add the notice marker to the pill**
 
@@ -3105,12 +3987,16 @@ Add the styles for the models section and the marker to the stylesheet the clien
 '.__mmq_models{margin-top:12px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1)}',
 '.__mmq_sectionTitle{font-weight:600;color:var(--dsw-alias-label-primary);margin-bottom:6px}',
 '.__mmq_modelList{display:flex;flex-wrap:wrap;gap:4px}',
-'.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-fill-l2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
-'.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warning);font-size:11px}',
+'.__mmq_modelChip{border-radius:var(--dsw-radius-sm);padding:1px 6px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
+'.__mmq_modelNotice{margin-top:8px;color:var(--dsw-alias-state-warn-label);font-size:11px}',
 '.__mmq_meta{margin-top:6px;color:var(--dsw-alias-label-tertiary);font-size:11px}',
 '.__mmq_badge{position:absolute;top:-2px;right:-2px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-business-primary)}',
 '.__mmq_pillWrap{position:relative;display:inline-flex}',
 ```
+
+Every CSS variable has to exist in the installed theme: `--dsw-alias-fill-l2` and
+`--dsw-alias-state-warning` do not, so the chip uses `--dsw-alias-bg-layer-2` and the notice uses
+`--dsw-alias-state-warn-label`.
 
 Render the badge inside a wrapper around the pill's existing content, and render it
 only while `hasNotice` is true:
@@ -3156,36 +4042,74 @@ Add the route next to the status route in `client.js`:
 const SYNC_ROUTE = '/plugin/minimax/sync'
 ```
 
-In the dock component, next to the other state, add the syncing flag and the request:
+In the dock component, next to the other state, add the syncing flag, the failure line and the request:
 
 ```js
-const [syncing, setSyncing] = React.useState(false)
+  const [syncing, setSyncing] = React.useState(false)
+  const [syncError, setSyncError] = React.useState(null)
+```
 
-// The sync probes the candidates MiniMax offers, which can take a while, so
-// the button asks and lets the status poll report the result.
-const syncNow = async () => {
-  if (syncing) return
-  setSyncing(true)
-  try {
-    await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
-  } catch {
-    // A failed request is reported by the status poll; the button only asks.
-  } finally {
-    setSyncing(false)
-  }
-}
+The Host answers HTTP 200 with `{"ok":false}` when a sync fails, so the payload is what says whether
+the sync worked, and the status route is refreshed right after the POST resolves:
+
+```js
+      // The sync probes the candidates MiniMax offers, which can take a
+      // while, so the button asks and waits for the answer. The Host answers
+      // HTTP 200 with `{"ok":false}` when the sync failed, so the payload is
+      // what says whether the sync worked.
+      const syncNow = async () => {
+        if (syncing) return
+        setSyncing(true)
+        setSyncError(null)
+        try {
+          const response = await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
+          const body = await response.json().catch(() => null)
+          if (!response.ok || body?.ok !== true) {
+            setSyncError(syncFailureText(body?.reason ?? `HTTP ${response.status}`, t))
+          }
+        } catch (error) {
+          // A failed request leaves the model list as it was, but the user
+          // has to see that the sync did not happen.
+          setSyncError(syncFailureText(error instanceof Error ? error.message : String(error), t))
+        } finally {
+          setSyncing(false)
+          // The status route is the only thing that reports the model list,
+          // so the panel is refreshed right away instead of waiting for the
+          // next poll.
+          readStatus().then((result) => setPayload(result))
+        }
+      }
+```
+
+The failure line is a locale string, so the panel never shows an internal reason raw:
+
+```js
+    /**
+     * The line the panel shows when a manual sync did not work.
+     *
+     * The Host answers with a fixed reason and never with an internal
+     * message, so the reason is all the browser can show.
+     *
+     * @param reason - why the sync failed.
+     * @param t - the locale function.
+     * @returns the line to show.
+     */
+    function syncFailureText(reason, t) {
+      if (reason === 'missing-credential') return t('missingCredential')
+      return t('modelsSyncFailed', { reason })
+    }
 ```
 
 Pass them to the panel:
 
 ```js
-h(ModelsPanel, { models, t, onSync: syncNow, syncing }),
+h(ModelsPanel, { models, t, onSync: syncNow, syncing, syncError }),
 ```
 
 And let the panel draw the button, under the synced-at line:
 
 ```js
-function ModelsPanel({ models, t, onSync, syncing }) {
+function ModelsPanel({ models, t, onSync, syncing, syncError }) {
 ```
 
 ```js
@@ -3199,24 +4123,28 @@ function ModelsPanel({ models, t, onSync, syncing }) {
           : null,
 ```
 
-Add the two locale strings to the inline `zh` and `en` dictionaries and to both JSON files:
+Add the locale strings to the inline `zh` and `en` dictionaries and to both JSON files:
 
 ```json
 "modelsSync": "立即同步",
-"modelsSyncing": "同步中…"
+"modelsSyncing": "同步中…",
+"modelsSyncFailed": "同步失败：{reason}"
 ```
 
 ```json
 "modelsSync": "Sync now",
-"modelsSyncing": "Syncing…"
+"modelsSyncing": "Syncing…",
+"modelsSyncFailed": "Sync failed: {reason}"
 ```
 
-And a style for the button, beside the other panel styles:
+And a style for the button, beside the other panel styles. The panel carries `pointer-events:none`, so
+the button has to take its events back, and `--dsw-alias-stroke-l2` does not exist in the theme:
 
 ```css
-'.__mmq_syncButton{margin-top:8px;border:1px solid var(--dsw-alias-stroke-l2);border-radius:var(--dsw-radius-sm);padding:2px 8px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;cursor:pointer}',
+'.__mmq_syncButton{margin-top:8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);padding:2px 8px;background:transparent;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;cursor:pointer;pointer-events:auto}',
 '.__mmq_syncButton:disabled{opacity:.6;cursor:default}',
 ```
+
 
 - [ ] **Step 7: Fix three things the review found**
 
@@ -3229,46 +4157,59 @@ are two. Correct it:
  * reads them.
 ```
 
-**A failed sync is invisible.** `fetch` does not reject on an HTTP error status, so a 4xx or a 5xx
-took the same path as a success. Check the status, and say what the failure means honestly — the
-status poll reports the model list, not the outcome of the sync:
+**A failed sync is invisible.** `fetch` does not reject on an HTTP error status, and the Host answers
+a failed sync with HTTP 200 and `{"ok":false}` — so even a status check passes. The payload's `ok` is
+what says whether the sync worked, and the failure has to reach the user; Step 6 reads the payload and
+sets the error line the panel shows.
+
+**The panel is locked away exactly when it is most useful.** The panel opened only when the *quota*
+succeeded, and the panel is the only place the sync button lives — so a quota that could not be read
+locked the models section away with it. The models section does not depend on the quota, so the panel
+opens when the **status route answered**:
 
 ```js
-  const syncNow = async () => {
-    if (syncing) return
-    setSyncing(true)
-    try {
-      const response = await fetch(SYNC_ROUTE, { method: 'POST', headers: { accept: 'application/json' } })
-      if (!response.ok) return
-    } catch {
-      // A failed request leaves the panel as it was. The status poll reports
-      // the model list, not the outcome of the sync.
-    } finally {
-      setSyncing(false)
-    }
-  }
+      // The panel opens on the status route's answer, not on the quota's:
+      // the models section and its sync button are independent of the quota,
+      // so a quota that could not be read must not lock them away.
+      const showPanel = open && payload !== null
 ```
 
-**The sync button disappears exactly when it is most useful.** The section returned `null` when no
-model had been synced, so a profile with a MiniMax route but no MiniMax models yet could not ask
-for a sync. Render the section whenever the status route answered, and the chips only when there
-are some:
+A quota that could not be read carries no percentages, so the panel says why instead of showing empty
+bars:
 
 ```js
-      if (models === undefined) return null
-      const synced = Array.isArray(models.synced) ? models.synced : []
-      const added = Array.isArray(models.added) ? models.added : []
-      return h('div', { className: '__mmq_models' },
+      // A quota that could not be read carries no percentages at all, so its
+      // windows are absent rather than zero.
+      const interval = view.ok === true ? view.intervalRemainingPercent : null
+      const weekly = view.ok === true ? view.weeklyRemainingPercent : null
 ```
 
-and inside the section, guard only the chip list:
+```js
+      if (view.ok !== true) {
+        // The quota could not be read, so the panel says why instead of
+        // claiming the plan has no limit.
+        rows.push(h('div', { className: '__mmq_error' }, view.reason === 'missing-credential'
+          ? t('missingCredential')
+          : t('requestFailed', { message: view.message ?? '' })))
+      } else if (rows.length === 0) {
+        rows.push(h('div', { className: '__mmq_hint' }, t('noWeeklyLimit')))
+      }
+```
+
+**Three theme tokens do not exist.** `--dsw-alias-separator-primary` and `--dsw-alias-label-error`
+have no definition in the installed theme, so they fall back to nothing. Use `--dsw-alias-border-l2`
+for the separator and `--dsw-alias-state-error-primary` for the error line:
 
 ```js
-        synced.length > 0
-          ? h('div', { className: '__mmq_modelList' },
-              synced.map((id) => h('span', { className: '__mmq_modelChip', key: id }, id)),
-            )
-          : null,
+      '.__mmq_sep{color:var(--dsw-alias-border-l2);margin:0 6px}',
+      '.__mmq_error{color:var(--dsw-alias-state-error-primary)}',
+```
+
+**The sync button cannot be clicked.** The panel carries `pointer-events:none`, so the button has to
+take its events back — and it needs a border token that exists:
+
+```js
+      '.__mmq_syncButton{...;border:1px solid var(--dsw-alias-border-l2);...;pointer-events:auto}',
 ```
 
 The credential grep must then look at **added lines only**, because the corrected comment puts the
@@ -3280,20 +4221,483 @@ git diff -U0 -- client.js | grep '^+' | grep -inE "api[-_ ]?key|token|secret|cre
 
 It must come back empty.
 
-- [ ] **Step 8: Run the checks**
+- [ ] **Step 8: Test the Browser half**
+
+The Browser half is plain JavaScript that registers a slot, so a test can load it the way the Harness
+loads it: read `client.js`, run it with a fake `window` and `document`, and hand its factory a
+stand-in for React. The stand-in implements the four hooks the module uses, so the test can render
+the pill, click it, and look at what it drew.
+
+Create `test/client.test.js`:
+
+```js
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const CLIENT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'client.js')
+
+/**
+ * A tiny React stand-in.
+ *
+ * The browser half hands a component to the slot it registers, so a test
+ * needs a renderer to see what the component renders. This one implements
+ * the four hooks the module uses, runs the effects after a render, and
+ * re-renders when the test asks for it.
+ *
+ * @returns `{ React, render, unmount }`.
+ */
+function createReact() {
+  const hooks = []
+  let cursor = 0
+
+  const React = {
+    createElement(type, props, ...children) {
+      return {
+        type,
+        props: { ...props, children: children.length === 1 ? children[0] : children },
+      }
+    },
+    useState(initial) {
+      const index = cursor++
+      if (hooks.length <= index) {
+        hooks[index] = { value: typeof initial === 'function' ? initial() : initial }
+      }
+      const hook = hooks[index]
+      const setValue = (next) => {
+        const value = typeof next === 'function' ? next(hook.value) : next
+        if (Object.is(value, hook.value)) return
+        hook.value = value
+      }
+      return [hook.value, setValue]
+    },
+    useRef(initial) {
+      const index = cursor++
+      if (hooks.length <= index) hooks[index] = { current: initial }
+      return hooks[index]
+    },
+    useCallback(fn, deps) {
+      const index = cursor++
+      if (hooks.length <= index) hooks[index] = { deps: undefined, fn }
+      const hook = hooks[index]
+      const changed = hook.deps === undefined
+        || deps === undefined
+        || deps.length !== hook.deps.length
+        || deps.some((dep, i) => !Object.is(dep, hook.deps[i]))
+      if (changed) {
+        hook.fn = fn
+        hook.deps = deps
+      }
+      return hook.fn
+    },
+    useEffect(fn, deps) {
+      const index = cursor++
+      if (hooks.length <= index) hooks[index] = { deps: undefined, cleanup: undefined }
+      const hook = hooks[index]
+      const changed = hook.deps === undefined
+        || deps === undefined
+        || deps.length !== hook.deps.length
+        || deps.some((dep, i) => !Object.is(dep, hook.deps[i]))
+      hook.deps = deps
+      hook.fn = fn
+      hook.pending = changed
+      if (changed) pending.push(hook)
+    },
+  }
+
+  const pending = []
+
+  /**
+   * Render a tree, running the function components inside it.
+   *
+   * The module's components are plain functions, so the tree holds them
+   * until they are called. None of the nested components uses a hook, so the
+   * parent's hook slots stay untouched.
+   *
+   * @param node - the tree.
+   * @returns the rendered tree.
+   */
+  function renderNode(node) {
+    if (Array.isArray(node)) return node.map((child) => renderNode(child))
+    if (node === null || node === undefined || typeof node !== 'object') return node
+    if (typeof node.type === 'function') return renderNode(node.type(node.props))
+    if (node.node !== undefined) return { ...node, node: renderNode(node.node) }
+    const children = node.props?.children
+    if (children === undefined) return node
+    return { ...node, props: { ...node.props, children: renderNode(children) } }
+  }
+
+  /**
+   * Render the component and run the effects that are due.
+   *
+   * @param Component - the component to render.
+   * @param props - its props.
+   * @returns the rendered tree.
+   */
+  function render(Component, props) {
+    cursor = 0
+    pending.length = 0
+    const tree = renderNode(Component(props))
+    for (const hook of pending.splice(0)) {
+      if (typeof hook.cleanup === 'function') hook.cleanup()
+      const cleanup = hook.fn()
+      hook.cleanup = typeof cleanup === 'function' ? cleanup : undefined
+    }
+    return tree
+  }
+
+  /**
+   * Run the cleanups of every effect.
+   */
+  function unmount() {
+    for (const hook of hooks) {
+      if (typeof hook.cleanup === 'function') hook.cleanup()
+    }
+  }
+
+  return { React, render, unmount }
+}
+
+/**
+ * Every node of a rendered tree, the portals included.
+ *
+ * @param node - the tree.
+ * @returns the nodes.
+ */
+function nodes(node) {
+  if (node === null || node === undefined || node === false) return []
+  if (Array.isArray(node)) return node.flatMap((child) => nodes(child))
+  if (typeof node !== 'object') return []
+  const own = [node]
+  if (node.node !== undefined) own.push(...nodes(node.node))
+  const children = node.props?.children
+  if (children !== undefined) own.push(...nodes(children))
+  return own
+}
+
+/**
+ * The node whose class name carries the given class.
+ *
+ * @param tree - the rendered tree.
+ * @param className - the class to look for.
+ * @returns the node, or undefined.
+ */
+function byClass(tree, className) {
+  return nodes(tree).find((node) => {
+    const value = node.props?.className
+    return typeof value === 'string' && value.split(' ').includes(className)
+  })
+}
+
+/**
+ * The text of a node and of everything below it.
+ *
+ * @param node - the node.
+ * @returns the text.
+ */
+function textOf(node) {
+  if (node === null || node === undefined || node === false) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map((child) => textOf(child)).join('')
+  if (typeof node !== 'object') return ''
+  if (node.node !== undefined) return textOf(node.node)
+  return textOf(node.props?.children)
+}
+
+/**
+ * Let the pending work run for a few turns of the event loop.
+ *
+ * @param rounds - how many turns to wait.
+ */
+async function flush(rounds = 20) {
+  for (let round = 0; round < rounds; round += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+}
+
+/**
+ * Load the browser half the way the Harness loads it.
+ *
+ * The module registers itself with the page's module loader, so the fake
+ * loader captures it and the test calls its factory with a stand-in for the
+ * module registry.
+ *
+ * @returns `{ module, window }`.
+ */
+async function loadClient() {
+  const source = await readFile(CLIENT_PATH, 'utf8')
+  let captured = null
+  const timers = new Map()
+  let nextTimer = 1
+  const fakeWindow = {
+    __ModuleLoader__: {
+      load(module) {
+        captured = module
+      },
+    },
+    setInterval(fn, ms) {
+      const id = nextTimer++
+      timers.set(id, { fn, ms })
+      return id
+    },
+    clearInterval(id) {
+      timers.delete(id)
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    innerWidth: 1280,
+    innerHeight: 800,
+  }
+  const fakeDocument = {
+    querySelector: () => null,
+    createElement: () => ({ dataset: {}, setAttribute() {}, textContent: '' }),
+    head: { appendChild() {} },
+    body: {},
+    addEventListener() {},
+    removeEventListener() {},
+  }
+  const evaluate = new Function('window', 'document', source)
+  evaluate(fakeWindow, fakeDocument)
+  assert.ok(captured !== null, 'the client half did not register itself')
+  assert.equal(captured.id, 'dsh-minimax')
+  return { module: captured, window: fakeWindow }
+}
+
+/**
+ * The status route's answer.
+ *
+ * @param options - `{ ok, models }`.
+ * @returns the payload.
+ */
+function statusPayload({
+  ok = true,
+  models = { synced: ['MiniMax-M3'], added: [], syncedAt: null },
+} = {}) {
+  return {
+    quota: ok
+      ? { ok: true, intervalRemainingPercent: 82, weeklyRemainingPercent: 35, fetchedAt: 1760000000000 }
+      : { ok: false, reason: 'missing-credential' },
+    models,
+  }
+}
+
+/**
+ * Mount the pill the browser half registers.
+ *
+ * @param options - `{ fetchImpl }`.
+ * @returns the mounted pill: a function that renders it, the dictionaries
+ *   it registered, and the requests it made.
+ */
+async function mountPill({ fetchImpl }) {
+  const { module } = await loadClient()
+  const { React, render, unmount } = createReact()
+  const ReactDOM = {
+    createPortal: (node, container) => ({ node, container }),
+  }
+  const registered = []
+  const dictionaries = []
+  const ctx = {
+    locale: {
+      bind: () => (key) => key,
+      register: (_ns, dict) => dictionaries.push(dict),
+    },
+    effect: (setup) => {
+      const dispose = setup()
+      return dispose
+    },
+    slots: {
+      inject: (_name, setup) => {
+        setup()
+      },
+      register: (options, component) => {
+        registered.push({ options, component })
+        return () => {}
+      },
+    },
+  }
+  const client = module.factory((name) => {
+    if (name === 'react') return React
+    if (name === 'react-dom') return ReactDOM
+    throw new Error(`the client half asked for an unknown module: ${name}`)
+  })
+  client.apply(ctx)
+  assert.equal(registered.length, 1)
+  const component = registered[0].component
+  const props = {
+    useProjection: () => ({ next: { provider: 'minimax-cn', model: 'MiniMax-M3' } }),
+    // The Harness locale service answers an unregistered key with the key
+    // name itself, so the test reads the key.
+    t: (key) => key,
+  }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = fetchImpl
+  return {
+    dictionaries,
+    props,
+    render: () => render(component, props),
+    unmount,
+    // The browser half talks to the routes through the global fetch, so it
+    // stays in place until the test is done with the pill.
+    dispose() {
+      globalThis.fetch = originalFetch
+      unmount()
+    },
+  }
+}
+
+/**
+ * Run the mounted pill until its tree stops changing.
+ *
+ * @param pill - the mounted pill.
+ * @returns the rendered tree.
+ */
+async function settle(pill) {
+  let tree = pill.render()
+  await flush()
+  tree = pill.render()
+  await flush()
+  return pill.render()
+}
+
+test('a failed manual sync shows an error line in the panel', async () => {
+  const requests = []
+  const pill = await mountPill({
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), method: init?.method ?? 'GET' })
+      if (init?.method === 'POST') {
+        // The Host answers HTTP 200 with a payload that says the sync failed.
+        return new Response(JSON.stringify({ ok: false, reason: 'sync-failed' }), { status: 200 })
+      }
+      return new Response(JSON.stringify(statusPayload()), { status: 200 })
+    },
+  })
+  try {
+    let tree = await settle(pill)
+    const pillButton = byClass(tree, '__mmq_pill')
+    assert.ok(pillButton !== undefined, 'the pill did not render')
+    pillButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    const syncButton = byClass(tree, '__mmq_syncButton')
+    assert.ok(syncButton !== undefined, 'the sync button did not render')
+    assert.equal(byClass(tree, '__mmq_error'), undefined)
+    syncButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    // The failed sync is visible: the panel carries an error line.
+    const error = byClass(tree, '__mmq_error')
+    assert.ok(error !== undefined, 'the failed sync left no error line')
+    assert.equal(textOf(error).includes('modelsSyncFailed'), true)
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('the panel opens when the quota could not be read', async () => {
+  const pill = await mountPill({
+    fetchImpl: async () => new Response(JSON.stringify(statusPayload({ ok: false })), { status: 200 }),
+  })
+  try {
+    let tree = await settle(pill)
+    const pillButton = byClass(tree, '__mmq_pill')
+    assert.ok(pillButton !== undefined, 'the pill did not render')
+    pillButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    // The models section does not depend on the quota, so the panel and its
+    // sync button stay reachable.
+    assert.ok(byClass(tree, '__mmq_panel') !== undefined, 'the panel did not open')
+    assert.ok(byClass(tree, '__mmq_models') !== undefined, 'the models section did not render')
+    assert.ok(byClass(tree, '__mmq_syncButton') !== undefined, 'the sync button did not render')
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('a successful manual sync refreshes the model list right away', async () => {
+  const requests = []
+  let lists = 0
+  const pill = await mountPill({
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), method: init?.method ?? 'GET' })
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify({ ok: true, added: ['MiniMax-M3.1-Flash'] }), { status: 200 })
+      }
+      lists += 1
+      return new Response(JSON.stringify(statusPayload({
+        models: {
+          synced: lists > 1 ? ['MiniMax-M3', 'MiniMax-M3.1-Flash'] : ['MiniMax-M3'],
+          added: lists > 1 ? ['MiniMax-M3.1-Flash'] : [],
+          syncedAt: null,
+        },
+      })), { status: 200 })
+    },
+  })
+  try {
+    let tree = await settle(pill)
+    const pillButton = byClass(tree, '__mmq_pill')
+    assert.ok(pillButton !== undefined, 'the pill did not render')
+    pillButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    const syncButton = byClass(tree, '__mmq_syncButton')
+    assert.ok(syncButton !== undefined, 'the sync button did not render')
+    const before = lists
+    syncButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    // The list catches up without waiting for the next poll.
+    assert.equal(lists, before + 1)
+    const chips = nodes(tree).filter((node) => node.props?.className === '__mmq_modelChip')
+    assert.deepEqual(chips.map((chip) => textOf(chip)), ['MiniMax-M3', 'MiniMax-M3.1-Flash'])
+    // A sync that worked leaves no error line behind.
+    assert.equal(byClass(tree, '__mmq_error'), undefined)
+  } finally {
+    pill.dispose()
+  }
+})
+
+test('the locale dictionaries and the locale files carry the same keys', async () => {
+  const pill = await mountPill({
+    fetchImpl: async () => new Response(JSON.stringify(statusPayload()), { status: 200 }),
+  })
+  try {
+    const zh = await readFile(join(dirname(CLIENT_PATH), 'locale', 'zh.json'), 'utf8')
+    const en = await readFile(join(dirname(CLIENT_PATH), 'locale', 'en.json'), 'utf8')
+    const zhFile = JSON.parse(zh).minimaxQuota
+    const enFile = JSON.parse(en).minimaxQuota
+    assert.equal(pill.dictionaries.length, 1)
+    const [dictionaries] = pill.dictionaries
+    // A string that lives in only one of the two places reads as the key
+    // name itself in the page, so the two have to agree.
+    assert.deepEqual(Object.keys(dictionaries.zh).sort(), Object.keys(zhFile).sort())
+    assert.deepEqual(Object.keys(dictionaries.en).sort(), Object.keys(enFile).sort())
+  } finally {
+    pill.dispose()
+  }
+})
+```
+
+The three tests cover the three things a user would notice: a failed manual sync leaves an error line
+in the panel, the panel opens even when the quota could not be read, and a successful manual sync
+refreshes the model list right away instead of waiting for the next poll.
+
+- [ ] **Step 9: Run the checks**
 
 Run: `npm test`
 Expected: PASS — the suite plus both syntax checks.
 
-- [ ] **Step 9: Verify the locale JSON parses**
+- [ ] **Step 10: Verify the locale JSON parses**
 
 Run: `node -e "for (const f of ['locale/zh.json','locale/en.json']) { JSON.parse(require('fs').readFileSync(f,'utf8')); console.log('ok', f) }"`
 Expected: `ok locale/zh.json` and `ok locale/en.json`.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add client.js locale/zh.json locale/en.json
+git add client.js locale/zh.json locale/en.json test/client.test.js
 git commit -m "feat: show the synced models and mark new ones in the Browser half
 
 The pill carries a badge when the plugin appended a model, and the
@@ -3328,6 +4732,25 @@ In `package.json`, change `"name": "dsh-minimax-quota"` to `"name": "dsh-minimax
 ```
 
 Bump the version to `1.1.0`.
+
+The `files` array must ship every runtime import — `lib/`, the locale files, the icon, the patch — and
+nothing else. npm always leaves `package-lock.json` out of a tarball, and the plan and the design
+document are not runtime files:
+
+```json
+  "files": [
+    "LICENSE",
+    "README.en.md",
+    "README.md",
+    "client.js",
+    "cordis.patch.yml",
+    "dsh-plugin.json",
+    "icon.svg",
+    "index.js",
+    "lib",
+    "locale/*.json"
+  ],
+```
 
 - [ ] **Step 2: Rename the client module id and the Host's message prefix**
 
@@ -3421,6 +4844,22 @@ grep -n "npm test\|Check JavaScript syntax" .github/workflows/ci.yml
 
 Expected: one line naming `npm test`, no line naming `Check JavaScript syntax`.
 
+The credential guard must not skip the READMEs: a key pasted into a README is a committed secret like
+any other, so the exclusion goes:
+
+```yaml
+      - name: Guard against committed secrets
+        run: |
+          # No real API key may ever enter the repository, and the READMEs
+          # are part of it: a key pasted into a README is a committed secret
+          # like any other.
+          if git grep -nE "sk-[A-Za-z0-9_-]{16,}" -- .; then
+            echo "::error::a credential-like value is committed to this repository"
+            exit 1
+          fi
+          echo "ok no credentials found"
+```
+
 - [ ] **Step 7: Update the READMEs**
 
 In `README.md` and `README.en.md`, replace every mention of `dsh-minimax-quota` as the **package** name with `dsh-minimax`. Keep the repository URL (`woaiCarlos/dsh-minimax-quota`) unchanged everywhere, because that is what the catalog entry points at.
@@ -3431,9 +4870,22 @@ Add a section describing the new behaviour, in the language of the file:
 >
 > 插件会探测 MiniMax 新发布的模型，把它们追加到 pi-ai 配置的 `providers.minimax-cn.models` 里。
 > 每个新模型都会实测：是否还能调用、单次最大输出是多少、是否支持思考。
-> **你已有的条目不会被修改或删除** —— 插件只追加。手动删掉的模型也不会被加回来。
+> **你已有的条目不会被删除、不会被重排、也不会被改值** —— 插件只追加。手动删掉的模型也不会被加回来。
+>
+> 写回时有一处需要说明：pi-ai schema 解析出来的**路由级默认值**（`defaultContextWindow`、`defaultMaxTokens` 等）
+> 会随这次写入一并落到 profile patch 的那条路由上；你写的**模型条目本身**按原样写回，一个字都不改。
 
-and the English counterpart.
+and the English counterpart:
+
+> **The entries you already have are never removed, never reordered and never changed in value** — the plugin only appends. A model you deleted by hand is not added back either.
+>
+> One thing to know about the write: the **route-level defaults the pi-ai schema resolves** (`defaultContextWindow`, `defaultMaxTokens` and the like) land in that route in the profile patch along with the new list. **The model entries you wrote are written back exactly as they are.**
+
+The READMEs must also name what the code does: the **daily sweep**, the **manual sync button**, the
+**state file** `dsh-minimax-state.json` and the **declared services** of the Host half
+(`inject: ['webServer', 'credentials', 'settings', 'profileContext']` — not `['webServer']`). The state
+file is the record of what the plugin added, so losing it re-enables the re-adding of a model the user
+deleted by hand, and the README has to say so.
 
 - [ ] **Step 8: Run the checks**
 
@@ -3652,11 +5104,12 @@ git commit -m "chore(market): point dsh-minimax at the renamed bundle"
 | §5.4 forceAdaptiveThinking | Task 4 |
 | §5.5 探测流程 | Task 3 |
 | §6 同步算法 | Tasks 5, 6, 7 |
+| §7.3 Host 日志记一行 | Task 7 (`logSync` for the startup, daily and manual syncs) |
 | §6.2 并发保护 | Task 7 (`descriptor.revision`) |
 | §6.3 失败不影响本体 | Task 7 (`scheduleSync` catch) |
 | §7 提醒机制 | Task 8 |
 | §8 配置与数据流 | Task 7, Task 6 |
-| §9 测试策略 | Tasks 1–7 |
+| §9 测试策略 | Tasks 1–7, Task 8 (the Browser half) |
 | §10 兼容性 | Task 9 (URL unchanged) |
 | §11 实施顺序 | Task order matches |
 | §12 未决问题 | Task 2 (`video` filtered by `SUPPORTED_MODALITIES`), Task 4 (probed cap wins) |
@@ -3670,7 +5123,7 @@ git commit -m "chore(market): point dsh-minimax at the renamed bundle"
 - `probeModel(modelId, apiKey, options)` returns `{ status, modelId, maxTokens?, supportsThinking?, reason? }` — Task 3 defines it; Task 4 reads `probe.maxTokens` and `probe.supportsThinking`; Task 7 checks `probe.status !== 'ok'`. Consistent.
 - `buildModelEntry(modelId, probe, spec?)` — Task 4 defines it; Task 7 calls `buildModelEntry(id, probe)` with two arguments. Consistent.
 - `planAppend({ currentModels, addedModels, candidateIds, entries })` returns `{ models, addedIds, changed }` — Task 5 defines it; Task 7 reads all three. Consistent.
-- `readState(dir)` / `writeState(dir, state)` return `{ addedModels, lastSyncAt }` — Task 6 defines it; Task 7 uses `state.addedModels` and `state.lastSyncAt`. Consistent.
+- `readState(dir)` / `writeState(dir, state)` return `{ addedModels, retiredModels, lastSyncAt }` — Task 6 defines it; Task 7 uses `state.addedModels`, `state.retiredModels` and `state.lastSyncAt`. Consistent.
 - `runSync(ctx, options)` returns `{ ok, added, models }` or `{ ok: false, reason }` — Task 7 defines it; its own test asserts `result.added` and `result.reason`. Consistent.
 - `buildStatusPayload(ctx, options)` returns `{ quota, models: { synced, added, syncedAt } }` — Task 7 defines it; Task 8's client reads `payload.quota` and `payload.models.synced` / `payload.models.added`. Consistent.
 - `lookupSpec(modelId)` returns `{ contextWindow, outputLimit, modalities, reasoningOptions }` — Task 2 defines it; Task 4 reads all four. Consistent.
