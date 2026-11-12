@@ -293,7 +293,8 @@ window.__ModuleLoader__.load({
 
     /**
      * The anchored panel: one card per quota window, each with a bar and
-     * the moment its window resets.
+     * the moment its window resets, the models section, and the line that
+     * reports a failed manual sync.
      */
     function QuotaPanel({ view, models, t, style, panelRef, onSync, syncing, syncError }) {
       const rows = []
@@ -398,7 +399,11 @@ window.__ModuleLoader__.load({
         h('div', { className: '__mmq_titleRule', 'aria-hidden': true }),
         h('p', { className: '__mmq_subtitle' }, t('panelSubtitle')),
         h('div', { className: '__mmq_rows' }, rows),
-        h(ModelsPanel, { models, t, onSync, syncing, syncError }),
+        h(ModelsPanel, { models, t, onSync, syncing }),
+        // The sync failure belongs to the panel and not to the models
+        // section: the section disappears when the status route did not
+        // answer, and a failed manual sync has to reach the user even then.
+        syncError ? h('div', { className: '__mmq_error', style: { marginTop: '8px' } }, syncError) : null,
         h(
           'div',
           { className: '__mmq_hint', style: { marginTop: '10px' } },
@@ -418,8 +423,11 @@ window.__ModuleLoader__.load({
      *
      * The section shows even when no model has been synced yet, so the sync
      * button is reachable in exactly the state where it is most useful.
+     *
+     * The section is absent when the status route did not answer, so the
+     * line that reports a failed manual sync belongs to the panel.
      */
-    function ModelsPanel({ models, t, onSync, syncing, syncError }) {
+    function ModelsPanel({ models, t, onSync, syncing }) {
       if (models === undefined) return null
       const synced = Array.isArray(models.synced) ? models.synced : []
       const added = Array.isArray(models.added) ? models.added : []
@@ -434,7 +442,6 @@ window.__ModuleLoader__.load({
           ? h('div', { className: '__mmq_modelNotice' }, t('modelsAdded', { count: added.length }))
           : null,
         models.syncedAt ? h('div', { className: '__mmq_meta' }, t('modelsSyncedAt', { when: formatClock(models.syncedAt) })) : null,
-        syncError ? h('div', { className: '__mmq_error' }, syncError) : null,
         onSync
           ? h('button', {
               className: '__mmq_syncButton',

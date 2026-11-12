@@ -24,6 +24,7 @@
     "LICENSE",
     "README.en.md",
     "README.md",
+    "catalog/awesome-dsh-plugin.yml",
     "client.js",
     "cordis.patch.yml",
     "dsh-plugin.json",

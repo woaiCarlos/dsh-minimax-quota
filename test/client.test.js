@@ -362,6 +362,46 @@ test('a failed manual sync shows an error line in the panel', async () => {
   }
 })
 
+test('a failed manual sync stays visible when the status route also fails', async () => {
+  let syncFailed = false
+  const pill = await mountPill({
+    fetchImpl: async (url, init) => {
+      if (init?.method === 'POST') {
+        syncFailed = true
+        // The Host answers HTTP 200 with a payload that says the sync failed.
+        return new Response(JSON.stringify({ ok: false, reason: 'sync-failed' }), { status: 200 })
+      }
+      // The status route fails once the sync failed, so the models section
+      // is gone and the panel keeps only the quota's error row.
+      if (syncFailed) return new Response('nope', { status: 500 })
+      return new Response(JSON.stringify(statusPayload()), { status: 200 })
+    },
+  })
+  try {
+    let tree = await settle(pill)
+    const pillButton = byClass(tree, '__mmq_pill')
+    assert.ok(pillButton !== undefined, 'the pill did not render')
+    pillButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    const syncButton = byClass(tree, '__mmq_syncButton')
+    assert.ok(syncButton !== undefined, 'the sync button did not render')
+    syncButton.props.onClick()
+    await flush()
+    tree = pill.render()
+    // The models section is gone, because the status route did not answer.
+    assert.equal(byClass(tree, '__mmq_models'), undefined)
+    // The failed sync still has to reach the user.
+    const errors = nodes(tree).filter((node) => node.props?.className === '__mmq_error')
+    assert.ok(
+      errors.some((node) => textOf(node).includes('modelsSyncFailed')),
+      'the failed sync left no error line',
+    )
+  } finally {
+    pill.dispose()
+  }
+})
+
 test('the panel opens when the quota could not be read', async () => {
   const pill = await mountPill({
     fetchImpl: async () => new Response(JSON.stringify(statusPayload({ ok: false })), { status: 200 }),
