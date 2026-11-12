@@ -1560,7 +1560,7 @@ test('buildStatusPayload reports the quota and the synced model ids', async () =
   const payload = await buildStatusPayload(ctx, {
     credentialRef: 'MINIMAX_CN_API_KEY',
     stateReader: async () => ({ addedModels: ['MiniMax-M3.1-Flash'], lastSyncAt: 1760000000000 }),
-    quotaFetcher: async () => ({ ok: true, intervalRemainingPercent: 82, weeklyRemainingPercent: 35 }),
+    quotaFetcher: async (_ctx, _ref, _signal) => ({ ok: true, intervalRemainingPercent: 82, weeklyRemainingPercent: 35 }),
   })
   assert.equal(payload.quota.ok, true)
   assert.deepEqual(payload.models.synced, ['MiniMax-M3', 'MiniMax-M3.1-Flash'])
@@ -1721,9 +1721,9 @@ export async function buildStatusPayload(ctx, options = {}) {
   const readStateFn = options.stateReader ?? (profileDir === undefined
     ? async () => ({ addedModels: [], lastSyncAt: null })
     : (dir) => readState(dir))
-  const quotaFetcher = options.quotaFetcher ?? ((c, ref) => fetchQuota(c, ref))
+  const quotaFetcher = options.quotaFetcher ?? ((c, ref, signal) => fetchQuota(c, ref, signal))
   const state = await readStateFn(profileDir)
-  const quota = await quotaFetcher(ctx, credentialRef)
+  const quota = await quotaFetcher(ctx, credentialRef, options.signal)
   const models = currentModels(descriptor)
   const synced = models.map((entry) => entry?.id).filter((id) => typeof id === 'string')
   return {
